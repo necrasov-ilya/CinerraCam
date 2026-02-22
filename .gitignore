@@ -1,0 +1,17 @@
+﻿skills/
+.gradle/
+**/build/
+local.properties
+*.iml
+.idea/caches/
+.idea/libraries/
+.idea/workspace.xml
+captures/
+
+# Android/Gradle cache outputs
+.externalNativeBuild/
+.cxx/
+
+# OS/editor noise
+Thumbs.db
+.DS_Store
