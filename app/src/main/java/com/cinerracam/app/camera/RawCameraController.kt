@@ -4,6 +4,9 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.ImageFormat
+import android.graphics.Matrix
+import android.graphics.RectF
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -14,6 +17,7 @@ import android.hardware.camera2.DngCreator
 import android.hardware.camera2.TotalCaptureResult
 import android.media.Image
 import android.media.ImageReader
+import android.media.MediaRecorder
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -34,6 +38,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
 import kotlin.math.max
 
 class RawCameraController(
@@ -52,7 +57,7 @@ class RawCameraController(
     }
 
     interface Listener {
-        fun onCameraReady(cameraId: String, rawSizes: List<RawSizeOption>, selected: RawSizeOption)
+        fun onCameraReady(snapshot: CameraCapabilitiesSnapshot)
 
         fun onStatus(message: String)
 
@@ -96,6 +101,31 @@ class RawCameraController(
     private var cameraCharacteristics: CameraCharacteristics? = null
     private var availableRawSizes: List<RawSizeOption> = emptyList()
     private var selectedRawSize: RawSizeOption? = null
+    private var availablePhotoResolutions: List<ResolutionOption> = emptyList()
+    private var availableVideoResolutions: List<ResolutionOption> = emptyList()
+    private var availableAspectRatios: List<AspectRatioOption> = emptyList()
+    private var availablePreviewSizes: List<Size> = emptyList()
+    private var selectedPhotoResolution: ResolutionOption? = null
+    private var selectedVideoResolution: ResolutionOption? = null
+    private var selectedAspectRatio: AspectRatioOption? = null
+
+    private var availableWhiteBalancePresets: List<WhiteBalancePreset> = listOf(WhiteBalancePreset.AUTO)
+    private var selectedWhiteBalance: WhiteBalancePreset = WhiteBalancePreset.AUTO
+
+    private var exposureCompensationRange: IntRange = 0..0
+    private var exposureCompensationStep: Float = 0f
+    private var exposureCompensationValue: Int = 0
+    private var isoRange: IntRange? = null
+    private var exposureTimeRangeNs: LongRange? = null
+    private var selectedIso: Int? = null
+    private var selectedExposureTimeNs: Long? = null
+
+    private var supportsManualSensorControls: Boolean = false
+    private var manualSensorEnabled: Boolean = false
+    private var supportsVideoStabilization: Boolean = false
+    private var videoStabilizationEnabled: Boolean = false
+
+    private var selectedPreviewSize: Size? = null
 
     private var targetFps: Int = 24
 
@@ -139,6 +169,12 @@ class RawCameraController(
             return
         }
 
+        if (isSamePreview) {
+            selectedPreviewSize?.let { previewSize ->
+                applyPreviewTransform(textureView, previewSize)
+            }
+        }
+
         if (!isSamePreview || cameraDevice == null || captureSession == null) {
             cameraHandler.post { openOrReconfigure() }
         }
@@ -171,9 +207,28 @@ class RawCameraController(
 
     fun setTargetFps(fps: Int) {
         targetFps = fps
+        cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+    }
+
+    fun onModeChanged(mode: CaptureMode) {
         if (isRecording.get()) {
-            cameraHandler.post { startRepeating(includeRaw = true) }
+            return
         }
+
+        val preferredResolution = when (mode) {
+            CaptureMode.PHOTO -> selectedPhotoResolution
+            CaptureMode.VIDEO, CaptureMode.STRESS -> selectedVideoResolution
+        }
+        if (preferredResolution != null) {
+            adaptRawSizeForResolution(preferredResolution)
+        }
+
+        cameraHandler.post {
+            if (cameraDevice != null) {
+                configureSession()
+            }
+        }
+        postCapabilitiesSnapshot()
     }
 
     fun setRawSize(option: RawSizeOption) {
@@ -181,6 +236,8 @@ class RawCameraController(
             return
         }
         selectedRawSize = option
+        selectedAspectRatio = AspectRatioOption.fromResolution(option.width, option.height)
+        postCapabilitiesSnapshot()
         cameraHandler.post {
             if (isRecording.get()) {
                 postStatus("Сначала остановите запись, затем меняйте RAW размер")
@@ -192,14 +249,126 @@ class RawCameraController(
         }
     }
 
+    fun setPhotoResolution(option: ResolutionOption) {
+        if (option == selectedPhotoResolution) {
+            return
+        }
+        selectedPhotoResolution = option
+        selectedAspectRatio = AspectRatioOption.fromResolution(option.width, option.height)
+        adaptRawSizeForResolution(option)
+        postCapabilitiesSnapshot()
+    }
+
+    fun setVideoResolution(option: ResolutionOption) {
+        if (option == selectedVideoResolution) {
+            return
+        }
+        selectedVideoResolution = option
+        selectedAspectRatio = AspectRatioOption.fromResolution(option.width, option.height)
+        adaptRawSizeForResolution(option)
+        postCapabilitiesSnapshot()
+    }
+
+    fun setAspectRatio(option: AspectRatioOption) {
+        if (option == selectedAspectRatio) {
+            return
+        }
+        selectedAspectRatio = option
+        val currentArea = selectedRawSize?.area ?: 0L
+        val adapted = chooseClosestRawByAspect(
+            options = availableRawSizes,
+            targetArea = if (currentArea > 0L) currentArea else (option.longSide.toLong() * option.shortSide.toLong()),
+            targetAspect = option.ratio,
+        )
+        if (adapted != null) {
+            selectedRawSize = adapted
+        }
+        selectedPhotoResolution = chooseClosestResolutionByAspect(
+            options = availablePhotoResolutions,
+            targetArea = selectedPhotoResolution?.area ?: (option.longSide.toLong() * option.shortSide.toLong()),
+            targetAspect = option.ratio,
+        )
+        selectedVideoResolution = chooseClosestResolutionByAspect(
+            options = availableVideoResolutions,
+            targetArea = selectedVideoResolution?.area ?: (option.longSide.toLong() * option.shortSide.toLong()),
+            targetAspect = option.ratio,
+        )
+        cameraHandler.post {
+            if (cameraDevice != null) {
+                if (isRecording.get()) {
+                    postStatus("Сначала остановите запись, затем меняйте формат кадра")
+                } else {
+                    configureSession()
+                }
+            }
+        }
+        postCapabilitiesSnapshot()
+    }
+
+    fun setVideoStabilizationEnabled(enabled: Boolean) {
+        videoStabilizationEnabled = enabled && supportsVideoStabilization
+        if (isRecording.get()) {
+            cameraHandler.post { startRepeating(includeRaw = true) }
+        } else {
+            cameraHandler.post { startRepeating(includeRaw = false) }
+        }
+        postCapabilitiesSnapshot()
+    }
+
+    fun setWhiteBalancePreset(preset: WhiteBalancePreset) {
+        val actual = availableWhiteBalancePresets.firstOrNull { it == preset } ?: return
+        if (actual == selectedWhiteBalance) {
+            return
+        }
+        selectedWhiteBalance = actual
+        cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+        postCapabilitiesSnapshot()
+    }
+
+    fun setExposureCompensation(value: Int) {
+        val range = exposureCompensationRange
+        exposureCompensationValue = value.coerceIn(range.first, range.last)
+        if (!manualSensorEnabled) {
+            cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+        }
+        postCapabilitiesSnapshot()
+    }
+
+    fun setManualSensorEnabled(enabled: Boolean) {
+        manualSensorEnabled = enabled && supportsManualSensorControls
+        cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+        postCapabilitiesSnapshot()
+    }
+
+    fun setManualIso(iso: Int?) {
+        val range = isoRange
+        selectedIso = if (iso == null || range == null) null else iso.coerceIn(range.first, range.last)
+        if (manualSensorEnabled) {
+            cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+        }
+        postCapabilitiesSnapshot()
+    }
+
+    fun setManualExposureTimeNs(exposureTimeNs: Long?) {
+        val range = exposureTimeRangeNs
+        selectedExposureTimeNs = if (exposureTimeNs == null || range == null) {
+            null
+        } else {
+            exposureTimeNs.coerceIn(range.first, range.last)
+        }
+        if (manualSensorEnabled) {
+            cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+        }
+        postCapabilitiesSnapshot()
+    }
+
     fun takePhoto() {
         cameraHandler.post {
             val device = cameraDevice
             val session = captureSession
-            val preview = previewSurface
             val rawSurface = rawReader?.surface
 
-            if (device == null || session == null || preview == null || rawSurface == null) {
+            if (device == null || session == null || rawSurface == null) {
                 postStatus("Камера не готова к съемке")
                 return@post
             }
@@ -207,7 +376,6 @@ class RawCameraController(
             pendingPhotoCaptures.incrementAndGet()
             try {
                 val request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-                    addTarget(preview)
                     addTarget(rawSurface)
                     applyCommonCaptureControls(includeRaw = true)
                 }.build()
@@ -292,6 +460,7 @@ class RawCameraController(
         recordingStoppedRealtimeMs = SystemClock.elapsedRealtime()
         postRecordingState(false, recordingSessionLabel)
         postStatus(statusMessage)
+        recordingMode = null
 
         startRepeating(includeRaw = false)
         emitStats()
@@ -310,10 +479,11 @@ class RawCameraController(
             }
 
             selectedCameraId = selected.first
-            cameraCharacteristics = selected.second
+            val chars = selected.second
+            cameraCharacteristics = chars
 
-            val rawSizes = selected.second
-                .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val rawSizes = streamMap
                 ?.getOutputSizes(ImageFormat.RAW_SENSOR)
                 ?.sortedByDescending { it.width * it.height }
                 ?.map(RawSizeOption::from)
@@ -326,12 +496,67 @@ class RawCameraController(
 
             availableRawSizes = rawSizes
             selectedRawSize = selectedRawSize ?: pickDefaultRawSize(rawSizes)
+            availablePhotoResolutions = streamMap
+                ?.getOutputSizes(ImageFormat.JPEG)
+                ?.sortedByDescending { it.width * it.height }
+                ?.map(ResolutionOption::from)
+                .orEmpty()
+            availableVideoResolutions = streamMap
+                ?.getOutputSizes(MediaRecorder::class.java)
+                ?.sortedByDescending { it.width * it.height }
+                ?.map(ResolutionOption::from)
+                .orEmpty()
+            availablePreviewSizes = streamMap
+                ?.getOutputSizes(SurfaceTexture::class.java)
+                ?.sortedByDescending { it.width * it.height }
+                .orEmpty()
 
-            postCameraReady(
-                cameraId = selected.first,
-                rawSizes = rawSizes,
-                selected = requireNotNull(selectedRawSize),
-            )
+            selectedPhotoResolution = selectedPhotoResolution ?: availablePhotoResolutions.firstOrNull()
+            selectedVideoResolution = selectedVideoResolution ?: availableVideoResolutions.firstOrNull()
+
+            availableAspectRatios = deriveAspectRatios(rawSizes, availablePhotoResolutions, availableVideoResolutions)
+            selectedAspectRatio = selectedAspectRatio
+                ?: selectedRawSize?.let { AspectRatioOption.fromResolution(it.width, it.height) }
+                ?: availableAspectRatios.firstOrNull()
+
+            availableWhiteBalancePresets = chars
+                .get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)
+                ?.toList()
+                ?.mapNotNull(WhiteBalancePreset::fromAwbMode)
+                ?.distinct()
+                .orEmpty()
+                .ifEmpty { listOf(WhiteBalancePreset.AUTO) }
+            selectedWhiteBalance = availableWhiteBalancePresets.firstOrNull { it == WhiteBalancePreset.AUTO }
+                ?: availableWhiteBalancePresets.first()
+
+            val aeRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+            exposureCompensationRange = aeRange?.lower?.let { lower ->
+                aeRange.upper.let { upper -> lower..upper }
+            } ?: (0..0)
+            exposureCompensationStep = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0f
+            exposureCompensationValue = 0
+
+            val capabilities = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+            supportsManualSensorControls = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
+
+            isoRange = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let { it.lower..it.upper }
+            exposureTimeRangeNs = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let { it.lower..it.upper }
+            selectedIso = isoRange?.first
+            selectedExposureTimeNs = exposureTimeRangeNs?.let { (it.first + it.last) / 2L }
+            manualSensorEnabled = false
+
+            val supportsDigitalStab = chars
+                .get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+                ?.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+                ?: false
+            val supportsOis = chars
+                .get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+                ?.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                ?: false
+            supportsVideoStabilization = supportsDigitalStab || supportsOis
+            videoStabilizationEnabled = supportsVideoStabilization
+
+            postCapabilitiesSnapshot()
         }
 
         if (cameraDevice == null) {
@@ -393,9 +618,15 @@ class RawCameraController(
             previewSurface = null
 
             val surfaceTexture = textureView.surfaceTexture ?: return
-            surfaceTexture.setDefaultBufferSize(textureView.width.coerceAtLeast(1), textureView.height.coerceAtLeast(1))
+            val previewSize = pickPreviewSize(
+                textureWidth = textureView.width.coerceAtLeast(1),
+                textureHeight = textureView.height.coerceAtLeast(1),
+            )
+            selectedPreviewSize = previewSize
+            surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
             val preview = Surface(surfaceTexture)
             previewSurface = preview
+            applyPreviewTransform(textureView, previewSize)
 
             val readerMaxImages = WRITE_QUEUE_CAPACITY + 2
             val reader = ImageReader.newInstance(rawSize.width, rawSize.height, ImageFormat.RAW_SENSOR, readerMaxImages)
@@ -470,6 +701,7 @@ class RawCameraController(
 
         previewSurface?.release()
         previewSurface = null
+        selectedPreviewSize = null
 
         cameraDevice?.close()
         cameraDevice = null
@@ -738,21 +970,145 @@ class RawCameraController(
         resultOrder.clear()
     }
 
+    private fun adaptRawSizeForResolution(target: ResolutionOption) {
+        val adapted = chooseClosestRawByAspect(
+            options = availableRawSizes,
+            targetArea = target.area,
+            targetAspect = target.aspectRatio,
+        ) ?: return
+
+        if (adapted == selectedRawSize) {
+            return
+        }
+
+        selectedRawSize = adapted
+        selectedAspectRatio = AspectRatioOption.fromResolution(adapted.width, adapted.height)
+        cameraHandler.post {
+            if (!isRecording.get() && cameraDevice != null) {
+                configureSession()
+            }
+        }
+    }
+
+    private fun pickPreviewSize(textureWidth: Int, textureHeight: Int): Size {
+        val previews = availablePreviewSizes
+        if (previews.isEmpty()) {
+            return Size(textureWidth, textureHeight)
+        }
+
+        val targetRatio = selectedAspectRatio?.ratio
+            ?: selectedRawSize?.aspectRatio
+            ?: (textureWidth.toDouble() / textureHeight.toDouble())
+        val targetArea = textureWidth.toLong() * textureHeight.toLong()
+
+        val sorted = previews.sortedBy { size ->
+            val aspect = size.width.toDouble() / size.height.toDouble()
+            val aspectPenalty = abs(aspect - targetRatio) * 10_000.0
+            val areaPenalty = abs(size.width.toLong() * size.height.toLong() - targetArea).toDouble() / 1_000.0
+            aspectPenalty + areaPenalty
+        }
+
+        return sorted.first()
+    }
+
+    private fun applyPreviewTransform(textureView: TextureView, previewSize: Size) {
+        textureView.post {
+            val viewWidth = textureView.width.toFloat()
+            val viewHeight = textureView.height.toFloat()
+            if (viewWidth <= 0f || viewHeight <= 0f) {
+                return@post
+            }
+
+            val bufferRect = RectF(0f, 0f, previewSize.width.toFloat(), previewSize.height.toFloat())
+            val viewRect = RectF(0f, 0f, viewWidth, viewHeight)
+            val matrix = Matrix()
+
+            matrix.setRectToRect(bufferRect, viewRect, Matrix.ScaleToFit.CENTER)
+
+            val scale = max(
+                viewWidth / previewSize.width.toFloat(),
+                viewHeight / previewSize.height.toFloat(),
+            )
+            matrix.postScale(scale, scale, viewWidth / 2f, viewHeight / 2f)
+            textureView.setTransform(matrix)
+        }
+    }
+
+    private fun deriveAspectRatios(
+        raw: List<RawSizeOption>,
+        photo: List<ResolutionOption>,
+        video: List<ResolutionOption>,
+    ): List<AspectRatioOption> {
+        val all = mutableListOf<AspectRatioOption>()
+        raw.forEach { all += AspectRatioOption.fromResolution(it.width, it.height) }
+        photo.forEach { all += AspectRatioOption.fromResolution(it.width, it.height) }
+        video.forEach { all += AspectRatioOption.fromResolution(it.width, it.height) }
+        return all.distinctBy { it.label }.sortedByDescending { it.ratio }
+    }
+
+    private fun postCapabilitiesSnapshot() {
+        val cameraId = selectedCameraId
+        val selectedRaw = selectedRawSize
+        if (cameraId == null || selectedRaw == null) {
+            return
+        }
+
+        val snapshot = CameraCapabilitiesSnapshot(
+            cameraId = cameraId,
+            rawSizes = availableRawSizes,
+            selectedRaw = selectedRaw,
+            photoResolutions = availablePhotoResolutions,
+            selectedPhotoResolution = selectedPhotoResolution,
+            videoResolutions = availableVideoResolutions,
+            selectedVideoResolution = selectedVideoResolution,
+            aspectRatios = availableAspectRatios,
+            selectedAspectRatio = selectedAspectRatio,
+            whiteBalanceOptions = availableWhiteBalancePresets,
+            selectedWhiteBalance = selectedWhiteBalance,
+            exposureCompensationRange = exposureCompensationRange,
+            exposureCompensationStep = exposureCompensationStep,
+            exposureCompensationValue = exposureCompensationValue,
+            isoRange = isoRange,
+            selectedIso = selectedIso,
+            exposureTimeRangeNs = exposureTimeRangeNs,
+            selectedExposureTimeNs = selectedExposureTimeNs,
+            supportsManualSensor = supportsManualSensorControls,
+            manualSensorEnabled = manualSensorEnabled,
+            supportsVideoStabilization = supportsVideoStabilization,
+            videoStabilizationEnabled = videoStabilizationEnabled,
+        )
+
+        mainHandler.post {
+            listener.onCameraReady(snapshot)
+        }
+    }
+
     private fun CaptureRequest.Builder.applyCommonCaptureControls(includeRaw: Boolean) {
         set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
         set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+        set(CaptureRequest.CONTROL_AWB_LOCK, false)
+        set(CaptureRequest.CONTROL_AE_LOCK, false)
+        set(CaptureRequest.CONTROL_CAPTURE_INTENT, if (includeRaw) {
+            if (isRecording.get()) CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD
+            else CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE
+        } else {
+            CaptureRequest.CONTROL_CAPTURE_INTENT_PREVIEW
+        })
 
-        if (supportsAwbAuto()) {
-            set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-            set(CaptureRequest.CONTROL_AWB_LOCK, false)
-        }
+        applyWhiteBalance()
+        applyExposureAndIso()
+        applyStabilization()
 
         if (supportsAberrationHighQuality()) {
             set(
                 CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE,
                 CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY,
             )
+        }
+        set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_HIGH_QUALITY)
+
+        if (supportsShadingHighQuality()) {
+            set(CaptureRequest.SHADING_MODE, CaptureRequest.SHADING_MODE_HIGH_QUALITY)
         }
 
         val fpsRange = pickFpsRange(targetFps)
@@ -768,10 +1124,65 @@ class RawCameraController(
         }
     }
 
-    private fun supportsAwbAuto(): Boolean {
-        val chars = cameraCharacteristics ?: return false
-        val awbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: return false
-        return awbModes.contains(CaptureRequest.CONTROL_AWB_MODE_AUTO)
+    private fun CaptureRequest.Builder.applyWhiteBalance() {
+        val available = availableWhiteBalancePresets
+        val selected = available.firstOrNull { it == selectedWhiteBalance } ?: WhiteBalancePreset.AUTO
+        set(CaptureRequest.CONTROL_AWB_MODE, selected.awbMode)
+    }
+
+    private fun CaptureRequest.Builder.applyExposureAndIso() {
+        val manual = manualSensorEnabled &&
+            supportsManualSensorControls &&
+            selectedIso != null &&
+            selectedExposureTimeNs != null
+
+        if (manual) {
+            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            set(CaptureRequest.SENSOR_SENSITIVITY, selectedIso)
+            set(CaptureRequest.SENSOR_EXPOSURE_TIME, selectedExposureTimeNs)
+            return
+        }
+
+        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        val compensation = exposureCompensationValue.coerceIn(
+            exposureCompensationRange.first,
+            exposureCompensationRange.last,
+        )
+        set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, compensation)
+    }
+
+    private fun CaptureRequest.Builder.applyStabilization() {
+        val chars = cameraCharacteristics ?: return
+        val enableDuringRecording = videoStabilizationEnabled &&
+            isRecording.get() &&
+            (recordingMode == CaptureMode.VIDEO || recordingMode == CaptureMode.STRESS)
+
+        val videoModes = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: intArrayOf()
+        val canUseVideoStab = videoModes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+        if (canUseVideoStab) {
+            set(
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                if (enableDuringRecording) {
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                } else {
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+                },
+            )
+        }
+
+        val oisModes = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: intArrayOf()
+        val canUseOis = oisModes.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+        if (canUseOis) {
+            val oisOn = enableDuringRecording && !canUseVideoStab
+            set(
+                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                if (oisOn) {
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+                } else {
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
+                },
+            )
+        }
     }
 
     private fun supportsAberrationHighQuality(): Boolean {
@@ -784,6 +1195,12 @@ class RawCameraController(
         val chars = cameraCharacteristics ?: return false
         val modes = chars.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_LENS_SHADING_MAP_MODES) ?: return false
         return modes.contains(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE_ON)
+    }
+
+    private fun supportsShadingHighQuality(): Boolean {
+        val chars = cameraCharacteristics ?: return false
+        val modes = chars.get(CameraCharacteristics.SHADING_AVAILABLE_MODES) ?: return false
+        return modes.contains(CaptureRequest.SHADING_MODE_HIGH_QUALITY)
     }
 
     private fun scheduleRecovery() {
@@ -868,10 +1285,6 @@ class RawCameraController(
 
     private fun postRecordingState(isRecording: Boolean, sessionLabel: String?) {
         mainHandler.post { listener.onRecordingStateChanged(isRecording, sessionLabel) }
-    }
-
-    private fun postCameraReady(cameraId: String, rawSizes: List<RawSizeOption>, selected: RawSizeOption) {
-        mainHandler.post { listener.onCameraReady(cameraId, rawSizes, selected) }
     }
 
     private fun postError(message: String, throwable: Throwable? = null) {

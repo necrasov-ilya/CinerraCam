@@ -27,6 +27,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -44,12 +45,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.cinerracam.app.camera.AspectRatioOption
 import com.cinerracam.app.camera.CaptureMode
 import com.cinerracam.app.camera.RawSizeOption
+import com.cinerracam.app.camera.ResolutionOption
+import com.cinerracam.app.camera.WhiteBalancePreset
+import kotlin.math.roundToInt
 
 private val AccentColor = Color(0xFFC92455)
 private val SurfaceColor = Color(0xFF0A0A0A)
-private val OverlayPanelColor = Color(0xCC111111)
+private val OverlayPanelColor = Color(0xCC141414)
 
 @Composable
 fun CinerraCamApp(viewModel: RecorderViewModel) {
@@ -73,7 +78,16 @@ fun CinerraCamApp(viewModel: RecorderViewModel) {
             onRequestCameraPermission = { permissionLauncher.launch(Manifest.permission.CAMERA) },
             onModeSelected = viewModel::onModeSelected,
             onRawSizeSelected = viewModel::onRawSizeSelected,
+            onPhotoResolutionSelected = viewModel::onPhotoResolutionSelected,
+            onVideoResolutionSelected = viewModel::onVideoResolutionSelected,
+            onAspectRatioSelected = viewModel::onAspectRatioSelected,
             onFpsSelected = viewModel::onFpsSelected,
+            onWhiteBalanceSelected = viewModel::onWhiteBalanceSelected,
+            onVideoStabilizationChanged = viewModel::onVideoStabilizationChanged,
+            onExposureCompensationChanged = viewModel::onExposureCompensationChanged,
+            onManualSensorEnabledChanged = viewModel::onManualSensorEnabledChanged,
+            onIsoChanged = viewModel::onIsoChanged,
+            onExposureTimeChanged = viewModel::onExposureTimeChanged,
             onStressDurationChanged = viewModel::onStressDurationChanged,
             onPrimaryActionClick = viewModel::onPrimaryActionClick,
         )
@@ -87,7 +101,16 @@ private fun RecorderScreen(
     onRequestCameraPermission: () -> Unit,
     onModeSelected: (CaptureMode) -> Unit,
     onRawSizeSelected: (RawSizeOption) -> Unit,
+    onPhotoResolutionSelected: (ResolutionOption) -> Unit,
+    onVideoResolutionSelected: (ResolutionOption) -> Unit,
+    onAspectRatioSelected: (AspectRatioOption) -> Unit,
     onFpsSelected: (Int) -> Unit,
+    onWhiteBalanceSelected: (WhiteBalancePreset) -> Unit,
+    onVideoStabilizationChanged: (Boolean) -> Unit,
+    onExposureCompensationChanged: (Int) -> Unit,
+    onManualSensorEnabledChanged: (Boolean) -> Unit,
+    onIsoChanged: (Int?) -> Unit,
+    onExposureTimeChanged: (Long?) -> Unit,
     onStressDurationChanged: (Int) -> Unit,
     onPrimaryActionClick: () -> Unit,
 ) {
@@ -99,16 +122,13 @@ private fun RecorderScreen(
             .background(Color.Black),
     ) {
         val headerHeight = 66.dp
-        val footerHeight = 188.dp
+        val footerHeight = 214.dp
         val viewfinderHeight = (maxHeight - headerHeight - footerHeight).coerceAtLeast(220.dp)
 
-        Column(
-            modifier = Modifier.fillMaxSize(),
-        ) {
+        Column(modifier = Modifier.fillMaxSize()) {
             CameraHeader(
                 state = state,
                 onRequestCameraPermission = onRequestCameraPermission,
-                onSettingsClick = { settingsVisible = true },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(headerHeight),
@@ -126,6 +146,7 @@ private fun RecorderScreen(
                 state = state,
                 onModeSelected = onModeSelected,
                 onPrimaryActionClick = onPrimaryActionClick,
+                onSettingsClick = { settingsVisible = true },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(footerHeight),
@@ -137,7 +158,16 @@ private fun RecorderScreen(
                 state = state,
                 onDismiss = { settingsVisible = false },
                 onRawSizeSelected = onRawSizeSelected,
+                onPhotoResolutionSelected = onPhotoResolutionSelected,
+                onVideoResolutionSelected = onVideoResolutionSelected,
+                onAspectRatioSelected = onAspectRatioSelected,
                 onFpsSelected = onFpsSelected,
+                onWhiteBalanceSelected = onWhiteBalanceSelected,
+                onVideoStabilizationChanged = onVideoStabilizationChanged,
+                onExposureCompensationChanged = onExposureCompensationChanged,
+                onManualSensorEnabledChanged = onManualSensorEnabledChanged,
+                onIsoChanged = onIsoChanged,
+                onExposureTimeChanged = onExposureTimeChanged,
                 onStressDurationChanged = onStressDurationChanged,
                 modifier = Modifier.fillMaxSize(),
             )
@@ -149,7 +179,6 @@ private fun RecorderScreen(
 private fun CameraHeader(
     state: RecorderUiState,
     onRequestCameraPermission: () -> Unit,
-    onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val statusChip = buildHeaderStatus(state)
@@ -169,39 +198,19 @@ private fun CameraHeader(
             fontWeight = FontWeight.SemiBold,
         )
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Box(
+            modifier = Modifier
+                .background(statusChip.background, RoundedCornerShape(100))
+                .padding(horizontal = 11.dp, vertical = 6.dp),
         ) {
-            Box(
-                modifier = Modifier
-                    .background(statusChip.background, RoundedCornerShape(100))
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-            ) {
-                Text(
-                    text = statusChip.label,
-                    color = statusChip.content,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-
-            Box(
-                modifier = Modifier
-                    .border(1.dp, Color(0x66FFFFFF))
-                    .clickable(onClick = onSettingsClick)
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-            ) {
-                Text(
-                    text = "SET",
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
+            Text(
+                text = statusChip.label,
+                color = statusChip.content,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+            )
         }
     }
-
 }
 
 @Composable
@@ -210,9 +219,7 @@ private fun Viewfinder(
     onPreviewTextureReady: (TextureView) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Box(
-        modifier = modifier.background(Color.Black),
-    ) {
+    Box(modifier = modifier.background(Color.Black)) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
@@ -256,13 +263,13 @@ private fun Viewfinder(
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Text(
-                text = "RAW ${state.selectedRawSize?.label ?: "-"} @ ${state.selectedFps}fps",
+                text = "RAW ${state.selectedRawSize?.label ?: "-"} | ${state.selectedAspectRatio?.label ?: "-"}",
                 color = Color.White,
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                text = "Captured ${state.stats.capturedFrames} | Written ${state.stats.writtenFrames} | Drop ${state.stats.droppedFrames}",
-                color = Color(0xFFDDDDDD),
+                text = "Captured ${state.stats.capturedFrames}  Written ${state.stats.writtenFrames}  Drop ${state.stats.droppedFrames}",
+                color = Color(0xFFD8D8D8),
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -274,12 +281,13 @@ private fun CameraFooter(
     state: RecorderUiState,
     onModeSelected: (CaptureMode) -> Unit,
     onPrimaryActionClick: () -> Unit,
+    onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
         modifier = modifier
             .background(SurfaceColor)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween,
     ) {
@@ -295,12 +303,22 @@ private fun CameraFooter(
             maxLines = 1,
         )
 
-        ShutterButton(
-            enabled = state.hasCameraPermission,
-            isRecording = state.isRecording,
-            label = actionLabel(state),
-            onClick = onPrimaryActionClick,
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(modifier = Modifier.size(56.dp))
+
+            ShutterButton(
+                enabled = state.hasCameraPermission,
+                isRecording = state.isRecording,
+                label = actionLabel(state),
+                onClick = onPrimaryActionClick,
+            )
+
+            ParamsButton(onClick = onSettingsClick)
+        }
     }
 }
 
@@ -347,11 +365,10 @@ private fun SwipeModeSelector(
             ) {
                 Text(
                     text = modeLabel(mode),
-                    color = if (selected) Color.White else Color(0xFF7B7B7B),
+                    color = if (selected) Color.White else Color(0xFF7A7A7A),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                 )
-
                 Box(
                     modifier = Modifier
                         .padding(top = 6.dp)
@@ -377,17 +394,17 @@ private fun ShutterButton(
     ) {
         Box(
             modifier = Modifier
-                .size(90.dp)
+                .size(94.dp)
                 .border(4.dp, Color.White, CircleShape)
                 .clickable(enabled = enabled, onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
             Box(
                 modifier = Modifier
-                    .size(if (isRecording) 36.dp else 66.dp)
+                    .size(if (isRecording) 38.dp else 68.dp)
                     .background(
                         color = if (isRecording) AccentColor else Color.White,
-                        shape = if (isRecording) RoundedCornerShape(10.dp) else CircleShape,
+                        shape = if (isRecording) RoundedCornerShape(11.dp) else CircleShape,
                     ),
             )
         }
@@ -402,11 +419,38 @@ private fun ShutterButton(
 }
 
 @Composable
+private fun ParamsButton(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(width = 56.dp, height = 42.dp)
+            .border(1.dp, Color(0x88FFFFFF))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "PARAM",
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+@Composable
 private fun SettingsOverlay(
     state: RecorderUiState,
     onDismiss: () -> Unit,
     onRawSizeSelected: (RawSizeOption) -> Unit,
+    onPhotoResolutionSelected: (ResolutionOption) -> Unit,
+    onVideoResolutionSelected: (ResolutionOption) -> Unit,
+    onAspectRatioSelected: (AspectRatioOption) -> Unit,
     onFpsSelected: (Int) -> Unit,
+    onWhiteBalanceSelected: (WhiteBalancePreset) -> Unit,
+    onVideoStabilizationChanged: (Boolean) -> Unit,
+    onExposureCompensationChanged: (Int) -> Unit,
+    onManualSensorEnabledChanged: (Boolean) -> Unit,
+    onIsoChanged: (Int?) -> Unit,
+    onExposureTimeChanged: (Long?) -> Unit,
     onStressDurationChanged: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -421,23 +465,29 @@ private fun SettingsOverlay(
     ) {
         Column(
             modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 74.dp, end = 12.dp, start = 22.dp)
+                .align(Alignment.BottomEnd)
+                .padding(start = 18.dp, end = 10.dp, bottom = 10.dp)
                 .background(OverlayPanelColor)
-                .border(1.dp, Color(0x60FFFFFF))
+                .border(1.dp, Color(0x55FFFFFF))
                 .clickable(
                     interactionSource = swallowInteraction,
                     indication = null,
                     onClick = {},
                 )
                 .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                text = "Настройки",
+                text = "Capture settings",
                 color = Color.White,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
+            )
+
+            AspectSelector(
+                options = state.aspectRatios,
+                selected = state.selectedAspectRatio,
+                onSelect = onAspectRatioSelected,
             )
 
             RawSizeSelector(
@@ -446,14 +496,24 @@ private fun SettingsOverlay(
                 onSelect = onRawSizeSelected,
             )
 
-            Text(
-                text = "FPS",
-                color = Color(0xFFD7D7D7),
-                style = MaterialTheme.typography.bodyMedium,
+            ResolutionSelector(
+                title = "Photo",
+                options = state.photoResolutions,
+                selected = state.selectedPhotoResolution,
+                onSelect = onPhotoResolutionSelected,
             )
+
+            ResolutionSelector(
+                title = "Video",
+                options = state.videoResolutions,
+                selected = state.selectedVideoResolution,
+                onSelect = onVideoResolutionSelected,
+            )
+
+            Text("FPS", color = Color(0xFFD7D7D7), style = MaterialTheme.typography.bodyMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 state.fpsOptions.forEach { fps ->
-                    SettingToggleButton(
+                    SettingChip(
                         label = fps.toString(),
                         selected = state.selectedFps == fps,
                         onClick = { onFpsSelected(fps) },
@@ -461,50 +521,99 @@ private fun SettingsOverlay(
                 }
             }
 
+            WhiteBalanceSelector(
+                options = state.whiteBalanceOptions,
+                selected = state.selectedWhiteBalance,
+                onSelect = onWhiteBalanceSelected,
+            )
+
+            if (state.supportsVideoStabilization) {
+                ToggleLine(
+                    label = "Video stabilization",
+                    checked = state.videoStabilizationEnabled,
+                    onCheckedChange = onVideoStabilizationChanged,
+                )
+            }
+
+            if (state.exposureCompensationRange.first != state.exposureCompensationRange.last) {
+                Text(
+                    text = "Exposure compensation: ${state.exposureCompensationValue}",
+                    color = Color(0xFFD7D7D7),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Slider(
+                    value = state.exposureCompensationValue.toFloat(),
+                    onValueChange = { onExposureCompensationChanged(it.roundToInt()) },
+                    valueRange = state.exposureCompensationRange.first.toFloat()..state.exposureCompensationRange.last.toFloat(),
+                )
+            }
+
+            if (state.supportsManualSensor) {
+                ToggleLine(
+                    label = "Manual ISO/Exposure",
+                    checked = state.manualSensorEnabled,
+                    onCheckedChange = onManualSensorEnabledChanged,
+                )
+
+                if (state.manualSensorEnabled) {
+                    state.isoRange?.let { range ->
+                        val isoCurrent = state.selectedIso ?: range.first
+                        Text(
+                            text = "ISO: $isoCurrent",
+                            color = Color(0xFFD7D7D7),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Slider(
+                            value = isoCurrent.toFloat(),
+                            onValueChange = { onIsoChanged(it.roundToInt()) },
+                            valueRange = range.first.toFloat()..range.last.toFloat(),
+                        )
+                    }
+
+                    state.exposureTimeRangeNs?.let { range ->
+                        val minMs = (range.first / 1_000_000L).coerceAtLeast(1L)
+                        val maxMs = (range.last / 1_000_000L).coerceAtLeast(minMs + 1L)
+                        val currentNs = state.selectedExposureTimeNs ?: range.first
+                        val currentMs = (currentNs / 1_000_000L).coerceIn(minMs, maxMs)
+
+                        Text(
+                            text = "Exposure: ${currentMs}ms",
+                            color = Color(0xFFD7D7D7),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Slider(
+                            value = currentMs.toFloat(),
+                            onValueChange = { onExposureTimeChanged(it.roundToInt().toLong() * 1_000_000L) },
+                            valueRange = minMs.toFloat()..maxMs.toFloat(),
+                        )
+                    }
+                }
+            }
+
             if (state.mode == CaptureMode.STRESS) {
                 Text(
-                    text = "Длительность теста: ${state.stressDurationSec} сек",
+                    text = "Stress duration: ${state.stressDurationSec}s",
                     color = Color(0xFFD7D7D7),
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodySmall,
                 )
                 Slider(
                     value = state.stressDurationSec.toFloat(),
-                    onValueChange = { onStressDurationChanged(it.toInt()) },
+                    onValueChange = { onStressDurationChanged(it.roundToInt()) },
                     valueRange = 5f..120f,
                 )
             }
 
             Text(
-                text = "Сохранение: ${state.savePathLabel}",
+                text = "Save: ${state.savePathLabel}",
                 color = Color.White,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodySmall,
             )
-
-            state.sessionLabel?.let { session ->
-                Text(
-                    text = "Сессия: $session",
-                    color = Color(0xFFCFCFCF),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-
             state.lastSavedUri?.let { uri ->
                 Text(
-                    text = "Последний файл: $uri",
-                    color = Color(0xFFBDBDBD),
+                    text = "Last: $uri",
+                    color = Color(0xFFBEBEBE),
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                SettingToggleButton(
-                    label = "Закрыть",
-                    selected = true,
-                    onClick = onDismiss,
                 )
             }
         }
@@ -512,7 +621,27 @@ private fun SettingsOverlay(
 }
 
 @Composable
-private fun SettingToggleButton(
+private fun ToggleLine(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = Color(0xFFD7D7D7),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun SettingChip(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
@@ -522,48 +651,29 @@ private fun SettingToggleButton(
             .background(if (selected) AccentColor else Color.Transparent)
             .border(1.dp, if (selected) AccentColor else Color(0x66FFFFFF))
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = 7.dp),
     ) {
         Text(
             text = label,
-            color = if (selected) Color.White else Color(0xFFDDDDDD),
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            color = if (selected) Color.White else Color(0xFFDCDCDC),
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         )
     }
 }
 
 @Composable
-private fun RawSizeSelector(
-    options: List<RawSizeOption>,
-    selected: RawSizeOption?,
-    onSelect: (RawSizeOption) -> Unit,
+private fun AspectSelector(
+    options: List<AspectRatioOption>,
+    selected: AspectRatioOption?,
+    onSelect: (AspectRatioOption) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
 
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(
-            text = "RAW",
-            color = Color(0xFFD7D7D7),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text("Format", color = Color(0xFFD7D7D7), style = MaterialTheme.typography.bodyMedium)
         Box {
-            Box(
-                modifier = Modifier
-                    .background(Color(0x22000000))
-                    .border(1.dp, Color(0x66FFFFFF))
-                    .clickable(enabled = options.isNotEmpty()) { expanded = true }
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-            ) {
-                Text(
-                    text = selected?.label ?: "Выбрать",
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
-
+            SettingBox(text = selected?.label ?: "Select", onClick = { expanded = true }, enabled = options.isNotEmpty())
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                 options.forEach { option ->
                     DropdownMenuItem(
@@ -579,6 +689,113 @@ private fun RawSizeSelector(
     }
 }
 
+@Composable
+private fun RawSizeSelector(
+    options: List<RawSizeOption>,
+    selected: RawSizeOption?,
+    onSelect: (RawSizeOption) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text("RAW size", color = Color(0xFFD7D7D7), style = MaterialTheme.typography.bodyMedium)
+        Box {
+            SettingBox(text = selected?.label ?: "Select", onClick = { expanded = true }, enabled = options.isNotEmpty())
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text("${option.label} (${option.aspectLabel})") },
+                        onClick = {
+                            expanded = false
+                            onSelect(option)
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ResolutionSelector(
+    title: String,
+    options: List<ResolutionOption>,
+    selected: ResolutionOption?,
+    onSelect: (ResolutionOption) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text("$title resolution", color = Color(0xFFD7D7D7), style = MaterialTheme.typography.bodyMedium)
+        Box {
+            SettingBox(
+                text = selected?.let { "${it.label} (${it.aspectLabel})" } ?: "Select",
+                onClick = { expanded = true },
+                enabled = options.isNotEmpty(),
+            )
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text("${option.label} (${option.aspectLabel})") },
+                        onClick = {
+                            expanded = false
+                            onSelect(option)
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WhiteBalanceSelector(
+    options: List<WhiteBalancePreset>,
+    selected: WhiteBalancePreset,
+    onSelect: (WhiteBalancePreset) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text("White balance", color = Color(0xFFD7D7D7), style = MaterialTheme.typography.bodyMedium)
+        Box {
+            SettingBox(text = selected.label, onClick = { expanded = true }, enabled = options.isNotEmpty())
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(option.label) },
+                        onClick = {
+                            expanded = false
+                            onSelect(option)
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingBox(
+    text: String,
+    onClick: () -> Unit,
+    enabled: Boolean,
+) {
+    Box(
+        modifier = Modifier
+            .background(Color(0x22000000))
+            .border(1.dp, Color(0x66FFFFFF))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 11.dp, vertical = 8.dp),
+    ) {
+        Text(
+            text = text,
+            color = if (enabled) Color.White else Color(0xFF808080),
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+}
+
 private data class HeaderStatus(
     val label: String,
     val background: Color,
@@ -587,46 +804,23 @@ private data class HeaderStatus(
 
 private fun buildHeaderStatus(state: RecorderUiState): HeaderStatus {
     if (!state.hasCameraPermission) {
-        return HeaderStatus(
-            label = "Нет доступа",
-            background = Color(0xFF2A2A2A),
-            content = Color.White,
-        )
+        return HeaderStatus("NO PERMISSION", Color(0xFF333333), Color.White)
     }
 
     val lowered = state.statusMessage.lowercase()
     return when {
-        lowered.contains("ошиб") || lowered.contains("error") -> HeaderStatus(
-            label = "Ошибка",
-            background = AccentColor,
-            content = Color.White,
-        )
-
-        state.isRecording -> HeaderStatus(
-            label = "REC",
-            background = AccentColor,
-            content = Color.White,
-        )
-
-        lowered.contains("готов") -> HeaderStatus(
-            label = "Готово",
-            background = Color(0xFF1D1D1D),
-            content = Color.White,
-        )
-
-        else -> HeaderStatus(
-            label = "Подготовка",
-            background = Color(0xFF1D1D1D),
-            content = Color(0xFFE2E2E2),
-        )
+        lowered.contains("error") || lowered.contains("ошиб") -> HeaderStatus("ERROR", AccentColor, Color.White)
+        state.isRecording -> HeaderStatus("REC", AccentColor, Color.White)
+        lowered.contains("ready") || lowered.contains("готов") -> HeaderStatus("READY", Color(0xFF1C1C1C), Color.White)
+        else -> HeaderStatus("INIT", Color(0xFF1C1C1C), Color(0xFFE0E0E0))
     }
 }
 
 private fun modeLabel(mode: CaptureMode): String {
     return when (mode) {
-        CaptureMode.PHOTO -> "Фото"
-        CaptureMode.VIDEO -> "Видео RAW"
-        CaptureMode.STRESS -> "Тест"
+        CaptureMode.PHOTO -> "Photo"
+        CaptureMode.VIDEO -> "Video RAW"
+        CaptureMode.STRESS -> "Stress"
     }
 }
 
@@ -642,12 +836,12 @@ private fun previousMode(current: CaptureMode, modes: List<CaptureMode>): Captur
 
 private fun actionLabel(state: RecorderUiState): String {
     if (!state.hasCameraPermission) {
-        return "Нет доступа"
+        return "No access"
     }
 
     return when (state.mode) {
-        CaptureMode.PHOTO -> "Спуск"
-        CaptureMode.VIDEO -> if (state.isRecording) "Стоп" else "Запись"
-        CaptureMode.STRESS -> if (state.isRecording) "Стоп тест" else "Старт тест"
+        CaptureMode.PHOTO -> "Shutter"
+        CaptureMode.VIDEO -> if (state.isRecording) "Stop" else "Record"
+        CaptureMode.STRESS -> if (state.isRecording) "Stop test" else "Start test"
     }
 }
