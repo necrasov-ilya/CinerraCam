@@ -1,21 +1,18 @@
-﻿package com.cinerracam.app.camera
+package com.cinerracam.app.camera
 
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.ImageFormat
-import android.graphics.Matrix
-import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
-import android.hardware.camera2.DngCreator
 import android.hardware.camera2.TotalCaptureResult
-import android.media.Image
 import android.media.ImageReader
 import android.media.MediaRecorder
 import android.os.Handler
@@ -27,35 +24,22 @@ import android.util.Size
 import android.view.Surface
 import android.view.TextureView
 import androidx.annotation.RequiresPermission
+import com.cinerracam.app.camera.internal.RawFramePipeline
+import com.cinerracam.app.camera.internal.RawFramePipelineListener
+import com.cinerracam.camera2.preview.PreviewSizeSelectionInput
+import com.cinerracam.camera2.preview.PreviewSizeSelector
+import com.cinerracam.camera2.preview.PreviewViewportCalculator
+import com.cinerracam.camera2.preview.PreviewViewportInput
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.ThreadFactory
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
-import kotlin.math.max
 
 class RawCameraController(
     private val context: Context,
     private val listener: Listener,
 ) {
-    private data class PendingImage(
-        val image: Image,
-        val kind: PendingKind,
-        val frameIndex: Long,
-    )
-
-    private enum class PendingKind {
-        PHOTO,
-        RECORD,
-    }
-
     interface Listener {
         fun onCameraReady(snapshot: CameraCapabilitiesSnapshot)
 
@@ -68,13 +52,15 @@ class RawCameraController(
         fun onLastSaved(uriString: String)
 
         fun onError(message: String, throwable: Throwable? = null)
+
+        fun onPreviewDebug(info: String) = Unit
     }
 
     private companion object {
-        private const val MAX_RESULT_CACHE = 256
-        private const val WRITE_QUEUE_CAPACITY = 3
         private const val RECOVERY_DELAY_MS = 450L
+        private const val FOREGROUND_REOPEN_DELAY_MS = 140L
         private const val DEFAULT_RELATIVE_PATH = "DCIM/CinerraCam"
+        private const val RAW_READER_MAX_IMAGES = 6
     }
 
     private val cameraManager: CameraManager = context.getSystemService(CameraManager::class.java)
@@ -82,15 +68,27 @@ class RawCameraController(
     private val cameraHandler = Handler(cameraThread.looper)
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private val writerExecutor = ThreadPoolExecutor(
-        1,
-        1,
-        0L,
-        TimeUnit.MILLISECONDS,
-        ArrayBlockingQueue(WRITE_QUEUE_CAPACITY),
-        ThreadFactory { runnable ->
-            Thread(runnable, "cinerracam-dng-writer").apply { isDaemon = true }
+    private val previewViewportCalculator = PreviewViewportCalculator()
+    private val previewSizeSelector = PreviewSizeSelector()
+
+    private val framePipeline = RawFramePipeline(
+        context = context,
+        listener = object : RawFramePipelineListener {
+            override fun onStatus(message: String) = postStatus(message)
+
+            override fun onStats(stats: RecordingStats) {
+                mainHandler.post { listener.onStats(stats) }
+            }
+
+            override fun onLastSaved(uri: String) = postLastSaved(uri)
+
+            override fun onError(message: String, throwable: Throwable?) = postError(message, throwable)
         },
+        getCameraCharacteristics = { cameraCharacteristics },
+        isRecordingProvider = { isRecording.get() },
+        recordingRelativePathProvider = { recordingRelativePath },
+        elapsedSecProvider = ::currentElapsedSec,
+        timestampLabelProvider = ::timestampLabel,
     )
 
     private var previewTextureView: TextureView? = null
@@ -126,7 +124,7 @@ class RawCameraController(
     private var videoStabilizationEnabled: Boolean = false
 
     private var selectedPreviewSize: Size? = null
-
+    private var currentMode: CaptureMode = CaptureMode.PHOTO
     private var targetFps: Int = 24
 
     private var cameraDevice: CameraDevice? = null
@@ -134,14 +132,7 @@ class RawCameraController(
     private var previewSurface: Surface? = null
     private var rawReader: ImageReader? = null
 
-    private val resultByTimestamp = HashMap<Long, TotalCaptureResult>()
-    private val resultOrder = ArrayDeque<Long>()
-    private val imageByTimestamp = HashMap<Long, PendingImage>()
-    private val imageOrder = ArrayDeque<Long>()
-
     private val isRecording = AtomicBoolean(false)
-    private val frameCounter = AtomicLong(0)
-    private val pendingPhotoCaptures = AtomicInteger(0)
 
     private var recordingMode: CaptureMode? = null
     private var recordingSessionLabel: String? = null
@@ -150,16 +141,9 @@ class RawCameraController(
     private var recordingStoppedRealtimeMs: Long = 0L
 
     private var stressStopRunnable: Runnable? = null
+    private var previewDebugInfo: String = ""
 
-    private val statsLock = Any()
-    private var stats: RecordingStats = RecordingStats()
-    private var totalWriteMs: Double = 0.0
-    private var dropStatusCounter: Long = 0L
     private val recoveryRunnable = Runnable { openOrReconfigure() }
-
-    init {
-        writerExecutor.rejectedExecutionHandler = ThreadPoolExecutor.AbortPolicy()
-    }
 
     fun bindPreviewTexture(textureView: TextureView) {
         val isSamePreview = previewTextureView === textureView
@@ -185,7 +169,10 @@ class RawCameraController(
         if (granted && appInForeground) {
             cameraHandler.post { openOrReconfigure() }
         } else {
-            cameraHandler.post { closeCameraSession() }
+            cameraHandler.post {
+                stopRecordingInternal("Запись остановлена: камера недоступна")
+                closeCameraSession()
+            }
             postStatus("Разрешение камеры не выдано")
         }
     }
@@ -193,24 +180,30 @@ class RawCameraController(
     fun onAppForegroundChanged(isForeground: Boolean) {
         appInForeground = isForeground
         cameraHandler.post {
+            cameraHandler.removeCallbacks(recoveryRunnable)
+
             if (!isForeground) {
                 stopRecordingInternal("Запись остановлена: приложение в фоне")
                 closeCameraSession()
                 return@post
             }
 
-            if (permissionGranted) {
-                openOrReconfigure()
+            if (!permissionGranted) {
+                return@post
             }
+
+            closeCameraSession()
+            cameraHandler.postDelayed(recoveryRunnable, FOREGROUND_REOPEN_DELAY_MS)
         }
     }
 
     fun setTargetFps(fps: Int) {
-        targetFps = fps
+        targetFps = fps.coerceIn(1, 240)
         cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
     }
 
     fun onModeChanged(mode: CaptureMode) {
+        currentMode = mode
         if (isRecording.get()) {
             return
         }
@@ -232,6 +225,11 @@ class RawCameraController(
     }
 
     fun setRawSize(option: RawSizeOption) {
+        if (isRecording.get()) {
+            postStatus("RAW размер можно менять только до старта записи")
+            return
+        }
+
         if (option == selectedRawSize) {
             return
         }
@@ -239,10 +237,6 @@ class RawCameraController(
         selectedAspectRatio = AspectRatioOption.fromResolution(option.width, option.height)
         postCapabilitiesSnapshot()
         cameraHandler.post {
-            if (isRecording.get()) {
-                postStatus("Сначала остановите запись, затем меняйте RAW размер")
-                return@post
-            }
             if (cameraDevice != null) {
                 configureSession()
             }
@@ -250,6 +244,11 @@ class RawCameraController(
     }
 
     fun setPhotoResolution(option: ResolutionOption) {
+        if (isRecording.get()) {
+            postStatus("Разрешение фото можно менять только до старта записи")
+            return
+        }
+
         if (option == selectedPhotoResolution) {
             return
         }
@@ -257,9 +256,19 @@ class RawCameraController(
         selectedAspectRatio = AspectRatioOption.fromResolution(option.width, option.height)
         adaptRawSizeForResolution(option)
         postCapabilitiesSnapshot()
+        cameraHandler.post {
+            if (cameraDevice != null) {
+                configureSession()
+            }
+        }
     }
 
     fun setVideoResolution(option: ResolutionOption) {
+        if (isRecording.get()) {
+            postStatus("Разрешение видео можно менять только до старта записи")
+            return
+        }
+
         if (option == selectedVideoResolution) {
             return
         }
@@ -267,51 +276,52 @@ class RawCameraController(
         selectedAspectRatio = AspectRatioOption.fromResolution(option.width, option.height)
         adaptRawSizeForResolution(option)
         postCapabilitiesSnapshot()
+        cameraHandler.post {
+            if (cameraDevice != null) {
+                configureSession()
+            }
+        }
     }
 
     fun setAspectRatio(option: AspectRatioOption) {
+        if (isRecording.get()) {
+            postStatus("Формат кадра можно менять только до старта записи")
+            return
+        }
+
         if (option == selectedAspectRatio) {
             return
         }
         selectedAspectRatio = option
-        val currentArea = selectedRawSize?.area ?: 0L
-        val adapted = chooseClosestRawByAspect(
+
+        val defaultArea = option.longSide.toLong() * option.shortSide.toLong()
+        selectedRawSize = chooseClosestRawByAspect(
             options = availableRawSizes,
-            targetArea = if (currentArea > 0L) currentArea else (option.longSide.toLong() * option.shortSide.toLong()),
+            targetArea = selectedRawSize?.area ?: defaultArea,
             targetAspect = option.ratio,
-        )
-        if (adapted != null) {
-            selectedRawSize = adapted
-        }
+        ) ?: selectedRawSize
         selectedPhotoResolution = chooseClosestResolutionByAspect(
             options = availablePhotoResolutions,
-            targetArea = selectedPhotoResolution?.area ?: (option.longSide.toLong() * option.shortSide.toLong()),
+            targetArea = selectedPhotoResolution?.area ?: defaultArea,
             targetAspect = option.ratio,
         )
         selectedVideoResolution = chooseClosestResolutionByAspect(
             options = availableVideoResolutions,
-            targetArea = selectedVideoResolution?.area ?: (option.longSide.toLong() * option.shortSide.toLong()),
+            targetArea = selectedVideoResolution?.area ?: defaultArea,
             targetAspect = option.ratio,
         )
+
+        postCapabilitiesSnapshot()
         cameraHandler.post {
             if (cameraDevice != null) {
-                if (isRecording.get()) {
-                    postStatus("Сначала остановите запись, затем меняйте формат кадра")
-                } else {
-                    configureSession()
-                }
+                configureSession()
             }
         }
-        postCapabilitiesSnapshot()
     }
 
     fun setVideoStabilizationEnabled(enabled: Boolean) {
         videoStabilizationEnabled = enabled && supportsVideoStabilization
-        if (isRecording.get()) {
-            cameraHandler.post { startRepeating(includeRaw = true) }
-        } else {
-            cameraHandler.post { startRepeating(includeRaw = false) }
-        }
+        cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
         postCapabilitiesSnapshot()
     }
 
@@ -326,8 +336,10 @@ class RawCameraController(
     }
 
     fun setExposureCompensation(value: Int) {
-        val range = exposureCompensationRange
-        exposureCompensationValue = value.coerceIn(range.first, range.last)
+        exposureCompensationValue = value.coerceIn(
+            exposureCompensationRange.first,
+            exposureCompensationRange.last,
+        )
         if (!manualSensorEnabled) {
             cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
         }
@@ -335,21 +347,33 @@ class RawCameraController(
     }
 
     fun setManualSensorEnabled(enabled: Boolean) {
+        if (isRecording.get()) {
+            postStatus("Ручной ISO/выдержка доступны только до старта записи")
+            return
+        }
         manualSensorEnabled = enabled && supportsManualSensorControls
-        cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+        cameraHandler.post { startRepeating(includeRaw = false) }
         postCapabilitiesSnapshot()
     }
 
     fun setManualIso(iso: Int?) {
+        if (isRecording.get()) {
+            postStatus("ISO можно менять только до старта записи")
+            return
+        }
         val range = isoRange
         selectedIso = if (iso == null || range == null) null else iso.coerceIn(range.first, range.last)
         if (manualSensorEnabled) {
-            cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+            cameraHandler.post { startRepeating(includeRaw = false) }
         }
         postCapabilitiesSnapshot()
     }
 
     fun setManualExposureTimeNs(exposureTimeNs: Long?) {
+        if (isRecording.get()) {
+            postStatus("Выдержку можно менять только до старта записи")
+            return
+        }
         val range = exposureTimeRangeNs
         selectedExposureTimeNs = if (exposureTimeNs == null || range == null) {
             null
@@ -357,7 +381,7 @@ class RawCameraController(
             exposureTimeNs.coerceIn(range.first, range.last)
         }
         if (manualSensorEnabled) {
-            cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+            cameraHandler.post { startRepeating(includeRaw = false) }
         }
         postCapabilitiesSnapshot()
     }
@@ -373,7 +397,7 @@ class RawCameraController(
                 return@post
             }
 
-            pendingPhotoCaptures.incrementAndGet()
+            framePipeline.markPhotoCaptureRequested()
             try {
                 val request = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                     addTarget(rawSurface)
@@ -383,7 +407,7 @@ class RawCameraController(
                 session.capture(request, captureCallback, cameraHandler)
                 postStatus("Съемка RAW фото...")
             } catch (t: Throwable) {
-                pendingPhotoCaptures.decrementAndGet()
+                framePipeline.rollbackPhotoCaptureRequest()
                 postError("Не удалось выполнить фото-съемку", t)
             }
         }
@@ -412,8 +436,7 @@ class RawCameraController(
             recordingRelativePath = "$DEFAULT_RELATIVE_PATH/${recordingSessionLabel}"
 
             isRecording.set(true)
-            frameCounter.set(0)
-            resetStatsLocked()
+            framePipeline.resetRecordingStats()
             recordingStartedRealtimeMs = SystemClock.elapsedRealtime()
             recordingStoppedRealtimeMs = 0L
 
@@ -443,9 +466,8 @@ class RawCameraController(
             cameraHandler.removeCallbacks(recoveryRunnable)
             stopRecordingInternal("Камера остановлена")
             closeCameraSession()
+            framePipeline.close()
         }
-
-        writerExecutor.shutdownNow()
         cameraThread.quitSafely()
     }
 
@@ -463,7 +485,20 @@ class RawCameraController(
         recordingMode = null
 
         startRepeating(includeRaw = false)
-        emitStats()
+        framePipeline.emitCurrentStats()
+    }
+
+    private fun currentElapsedSec(): Int {
+        val start = recordingStartedRealtimeMs
+        if (start <= 0L) {
+            return 0
+        }
+        val end = if (isRecording.get()) {
+            SystemClock.elapsedRealtime()
+        } else {
+            if (recordingStoppedRealtimeMs > 0L) recordingStoppedRealtimeMs else SystemClock.elapsedRealtime()
+        }
+        return ((end - start).coerceAtLeast(0L) / 1000L).toInt()
     }
 
     private fun openOrReconfigure() {
@@ -472,91 +507,8 @@ class RawCameraController(
             return
         }
 
-        if (selectedCameraId == null || cameraCharacteristics == null || availableRawSizes.isEmpty()) {
-            val selected = selectRawCamera() ?: run {
-                postError("Не найдена камера с RAW_SENSOR")
-                return
-            }
-
-            selectedCameraId = selected.first
-            val chars = selected.second
-            cameraCharacteristics = chars
-
-            val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val rawSizes = streamMap
-                ?.getOutputSizes(ImageFormat.RAW_SENSOR)
-                ?.sortedByDescending { it.width * it.height }
-                ?.map(RawSizeOption::from)
-                .orEmpty()
-
-            if (rawSizes.isEmpty()) {
-                postError("Камера не отдает RAW размеры")
-                return
-            }
-
-            availableRawSizes = rawSizes
-            selectedRawSize = selectedRawSize ?: pickDefaultRawSize(rawSizes)
-            availablePhotoResolutions = streamMap
-                ?.getOutputSizes(ImageFormat.JPEG)
-                ?.sortedByDescending { it.width * it.height }
-                ?.map(ResolutionOption::from)
-                .orEmpty()
-            availableVideoResolutions = streamMap
-                ?.getOutputSizes(MediaRecorder::class.java)
-                ?.sortedByDescending { it.width * it.height }
-                ?.map(ResolutionOption::from)
-                .orEmpty()
-            availablePreviewSizes = streamMap
-                ?.getOutputSizes(SurfaceTexture::class.java)
-                ?.sortedByDescending { it.width * it.height }
-                .orEmpty()
-
-            selectedPhotoResolution = selectedPhotoResolution ?: availablePhotoResolutions.firstOrNull()
-            selectedVideoResolution = selectedVideoResolution ?: availableVideoResolutions.firstOrNull()
-
-            availableAspectRatios = deriveAspectRatios(rawSizes, availablePhotoResolutions, availableVideoResolutions)
-            selectedAspectRatio = selectedAspectRatio
-                ?: selectedRawSize?.let { AspectRatioOption.fromResolution(it.width, it.height) }
-                ?: availableAspectRatios.firstOrNull()
-
-            availableWhiteBalancePresets = chars
-                .get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)
-                ?.toList()
-                ?.mapNotNull(WhiteBalancePreset::fromAwbMode)
-                ?.distinct()
-                .orEmpty()
-                .ifEmpty { listOf(WhiteBalancePreset.AUTO) }
-            selectedWhiteBalance = availableWhiteBalancePresets.firstOrNull { it == WhiteBalancePreset.AUTO }
-                ?: availableWhiteBalancePresets.first()
-
-            val aeRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
-            exposureCompensationRange = aeRange?.lower?.let { lower ->
-                aeRange.upper.let { upper -> lower..upper }
-            } ?: (0..0)
-            exposureCompensationStep = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0f
-            exposureCompensationValue = 0
-
-            val capabilities = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
-            supportsManualSensorControls = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
-
-            isoRange = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let { it.lower..it.upper }
-            exposureTimeRangeNs = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let { it.lower..it.upper }
-            selectedIso = isoRange?.first
-            selectedExposureTimeNs = exposureTimeRangeNs?.let { (it.first + it.last) / 2L }
-            manualSensorEnabled = false
-
-            val supportsDigitalStab = chars
-                .get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
-                ?.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
-                ?: false
-            val supportsOis = chars
-                .get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
-                ?.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
-                ?: false
-            supportsVideoStabilization = supportsDigitalStab || supportsOis
-            videoStabilizationEnabled = supportsVideoStabilization
-
-            postCapabilitiesSnapshot()
+        if (!ensureCapabilitiesLoaded()) {
+            return
         }
 
         if (cameraDevice == null) {
@@ -564,6 +516,103 @@ class RawCameraController(
         } else {
             configureSession()
         }
+    }
+
+    private fun ensureCapabilitiesLoaded(): Boolean {
+        if (selectedCameraId != null && cameraCharacteristics != null && availableRawSizes.isNotEmpty()) {
+            return true
+        }
+
+        val selected = selectRawCamera() ?: run {
+            postError("Не найдена камера с RAW_SENSOR")
+            return false
+        }
+
+        selectedCameraId = selected.first
+        val chars = selected.second
+        cameraCharacteristics = chars
+
+        val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val rawSizes = streamMap
+            ?.getOutputSizes(ImageFormat.RAW_SENSOR)
+            ?.sortedByDescending { it.width * it.height }
+            ?.map(RawSizeOption::from)
+            .orEmpty()
+
+        if (rawSizes.isEmpty()) {
+            postError("Камера не отдает RAW размеры")
+            return false
+        }
+
+        availableRawSizes = rawSizes
+        selectedRawSize = selectedRawSize ?: pickDefaultRawSize(rawSizes)
+        availablePhotoResolutions = streamMap
+            ?.getOutputSizes(ImageFormat.JPEG)
+            ?.sortedByDescending { it.width * it.height }
+            ?.map(ResolutionOption::from)
+            .orEmpty()
+        availableVideoResolutions = streamMap
+            ?.getOutputSizes(MediaRecorder::class.java)
+            ?.sortedByDescending { it.width * it.height }
+            ?.map(ResolutionOption::from)
+            .orEmpty()
+
+        if (availableVideoResolutions.isEmpty()) {
+            availableVideoResolutions = availablePhotoResolutions
+        }
+
+        availablePreviewSizes = streamMap
+            ?.getOutputSizes(SurfaceTexture::class.java)
+            ?.sortedByDescending { it.width * it.height }
+            .orEmpty()
+
+        selectedPhotoResolution = selectedPhotoResolution ?: availablePhotoResolutions.firstOrNull()
+        selectedVideoResolution = selectedVideoResolution ?: availableVideoResolutions.firstOrNull()
+
+        availableAspectRatios = deriveAspectRatios(rawSizes, availablePhotoResolutions, availableVideoResolutions)
+        selectedAspectRatio = selectedAspectRatio
+            ?: selectedRawSize?.let { AspectRatioOption.fromResolution(it.width, it.height) }
+            ?: availableAspectRatios.firstOrNull()
+
+        availableWhiteBalancePresets = chars
+            .get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)
+            ?.toList()
+            ?.mapNotNull(WhiteBalancePreset::fromAwbMode)
+            ?.distinct()
+            .orEmpty()
+            .ifEmpty { listOf(WhiteBalancePreset.AUTO) }
+        selectedWhiteBalance = availableWhiteBalancePresets.firstOrNull { it == WhiteBalancePreset.AUTO }
+            ?: availableWhiteBalancePresets.first()
+
+        val aeRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        exposureCompensationRange = aeRange?.lower?.let { lower ->
+            aeRange.upper.let { upper -> lower..upper }
+        } ?: (0..0)
+        exposureCompensationStep = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0f
+        exposureCompensationValue = 0
+
+        val capabilities = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+        supportsManualSensorControls = capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
+
+        isoRange = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let { it.lower..it.upper }
+        exposureTimeRangeNs = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let { it.lower..it.upper }
+        selectedIso = isoRange?.first
+        selectedExposureTimeNs = exposureTimeRangeNs?.let { (it.first + it.last) / 2L }
+        manualSensorEnabled = false
+
+        val supportsDigitalStab = chars
+            .get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
+            ?.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+            ?: false
+        val supportsOis = chars
+            .get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
+            ?.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+            ?: false
+        supportsVideoStabilization = supportsDigitalStab || supportsOis
+        videoStabilizationEnabled = supportsVideoStabilization
+
+        postCapabilitiesSnapshot()
+        return true
     }
 
     @RequiresPermission(Manifest.permission.CAMERA)
@@ -597,6 +646,8 @@ class RawCameraController(
                     scheduleRecovery()
                 }
             }, cameraHandler)
+        } catch (security: SecurityException) {
+            postError("Нет доступа к камере", security)
         } catch (t: Throwable) {
             postError("Не удалось открыть камеру", t)
         }
@@ -619,8 +670,8 @@ class RawCameraController(
 
             val surfaceTexture = textureView.surfaceTexture ?: return
             val previewSize = pickPreviewSize(
-                textureWidth = textureView.width.coerceAtLeast(1),
-                textureHeight = textureView.height.coerceAtLeast(1),
+                viewWidth = textureView.width.coerceAtLeast(1),
+                viewHeight = textureView.height.coerceAtLeast(1),
             )
             selectedPreviewSize = previewSize
             surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
@@ -628,8 +679,7 @@ class RawCameraController(
             previewSurface = preview
             applyPreviewTransform(textureView, previewSize)
 
-            val readerMaxImages = WRITE_QUEUE_CAPACITY + 2
-            val reader = ImageReader.newInstance(rawSize.width, rawSize.height, ImageFormat.RAW_SENSOR, readerMaxImages)
+            val reader = ImageReader.newInstance(rawSize.width, rawSize.height, ImageFormat.RAW_SENSOR, RAW_READER_MAX_IMAGES)
             reader.setOnImageAvailableListener(rawImageListener, cameraHandler)
             rawReader = reader
 
@@ -644,12 +694,14 @@ class RawCameraController(
 
                     override fun onConfigureFailed(session: CameraCaptureSession) {
                         postError("Не удалось настроить capture session")
+                        scheduleRecovery()
                     }
                 },
                 cameraHandler,
             )
         } catch (t: Throwable) {
             postError("Ошибка конфигурации камеры", t)
+            scheduleRecovery()
         }
     }
 
@@ -659,12 +711,7 @@ class RawCameraController(
         val preview = previewSurface ?: return
 
         try {
-            val template = if (includeRaw) {
-                CameraDevice.TEMPLATE_RECORD
-            } else {
-                CameraDevice.TEMPLATE_PREVIEW
-            }
-
+            val template = if (includeRaw) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
             val request = device.createCaptureRequest(template).apply {
                 addTarget(preview)
 
@@ -678,6 +725,7 @@ class RawCameraController(
             session.setRepeatingRequest(request, captureCallback, cameraHandler)
         } catch (t: Throwable) {
             postError("Ошибка запуска preview/request", t)
+            scheduleRecovery()
         }
     }
 
@@ -706,7 +754,7 @@ class RawCameraController(
         cameraDevice?.close()
         cameraDevice = null
 
-        clearPendingBuffers()
+        framePipeline.clearPendingBuffers()
     }
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -715,11 +763,15 @@ class RawCameraController(
             request: CaptureRequest,
             result: TotalCaptureResult,
         ) {
-            val ts = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: return
-            resultByTimestamp[ts] = result
-            resultOrder.add(ts)
-            processPendingPair(ts)
-            trimPendingBuffers()
+            framePipeline.onCaptureResult(result)
+        }
+
+        override fun onCaptureFailed(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            failure: CaptureFailure,
+        ) {
+            framePipeline.reportDrop("capture_failed")
         }
     }
 
@@ -730,244 +782,7 @@ class RawCameraController(
             null
         } ?: return@OnImageAvailableListener
 
-        val timestampNs = image.timestamp
-        val isPhotoRequest = pendingPhotoCaptures.get() > 0 && !isRecording.get()
-
-        if (!isPhotoRequest && !isRecording.get()) {
-            image.close()
-            return@OnImageAvailableListener
-        }
-
-        val pendingImage = if (isPhotoRequest) {
-            pendingPhotoCaptures.decrementAndGet()
-            PendingImage(
-                image = image,
-                kind = PendingKind.PHOTO,
-                frameIndex = 0L,
-            )
-        } else {
-            val index = frameCounter.incrementAndGet()
-            onFrameCaptured()
-            PendingImage(
-                image = image,
-                kind = PendingKind.RECORD,
-                frameIndex = index,
-            )
-        }
-
-        imageByTimestamp[timestampNs] = pendingImage
-        imageOrder.add(timestampNs)
-        processPendingPair(timestampNs)
-        trimPendingBuffers()
-    }
-
-    private fun submitWriteTask(task: FrameWriteTask, dropReason: String): Boolean {
-        return try {
-            writerExecutor.execute(task)
-            updateQueueHighWatermark(writerExecutor.queue.size)
-            true
-        } catch (_: RejectedExecutionException) {
-            onFrameDropped(dropReason)
-            false
-        }
-    }
-
-    private inner class FrameWriteTask(
-        private val image: Image,
-        private val result: TotalCaptureResult,
-        private val fileName: String,
-        private val relativePath: String,
-        private val updateRecordingStats: Boolean,
-        private val frameIndex: Long,
-    ) : Runnable {
-        override fun run() {
-            val characteristics = cameraCharacteristics
-            if (characteristics == null) {
-                image.close()
-                onFrameDropped("missing_camera_characteristics")
-                return
-            }
-
-            val startedNs = SystemClock.elapsedRealtimeNanos()
-
-            try {
-                val saveResult = CameraStorage.saveDng(
-                    context = context,
-                    displayName = fileName,
-                    relativePath = relativePath,
-                ) { stream ->
-                    DngCreator(characteristics, result).use { creator ->
-                        creator.writeImage(stream, image)
-                    }
-                }
-
-                val writeMs = (SystemClock.elapsedRealtimeNanos() - startedNs) / 1_000_000.0
-
-                if (updateRecordingStats) {
-                    onFrameWritten(writeMs, saveResult.bytesWritten, frameIndex)
-                } else {
-                    postStatus("Фото сохранено")
-                }
-
-                postLastSaved(saveResult.uri.toString())
-            } catch (t: Throwable) {
-                onFrameDropped("write_failed")
-                postError("Ошибка записи DNG", t)
-            } finally {
-                image.close()
-            }
-        }
-    }
-
-    private fun onFrameCaptured() {
-        synchronized(statsLock) {
-            stats = stats.copy(
-                capturedFrames = stats.capturedFrames + 1,
-                elapsedSec = currentElapsedSecLocked(),
-            )
-        }
-        emitStats()
-    }
-
-    private fun onFrameWritten(writeMs: Double, bytesWritten: Long, frameIndex: Long) {
-        synchronized(statsLock) {
-            totalWriteMs += writeMs
-            val written = stats.writtenFrames + 1
-            val writtenMb = stats.writtenMb + (bytesWritten.toDouble() / (1024.0 * 1024.0))
-
-            stats = stats.copy(
-                writtenFrames = written,
-                avgWriteMs = if (written > 0) totalWriteMs / written else 0.0,
-                writtenMb = writtenMb,
-                elapsedSec = currentElapsedSecLocked(),
-            )
-        }
-
-        if (frameIndex % 10L == 0L || frameIndex <= 3L) {
-            emitStats()
-        }
-    }
-
-    private fun onFrameDropped(reason: String) {
-        synchronized(statsLock) {
-            stats = stats.copy(
-                droppedFrames = stats.droppedFrames + 1,
-                elapsedSec = currentElapsedSecLocked(),
-            )
-        }
-
-        dropStatusCounter += 1
-        if (dropStatusCounter % 15L == 1L) {
-            postStatus("Дропы кадров: $reason")
-        }
-        emitStats()
-    }
-
-    private fun updateQueueHighWatermark(queueSize: Int) {
-        synchronized(statsLock) {
-            stats = stats.copy(
-                queueHighWatermark = max(stats.queueHighWatermark, queueSize),
-                elapsedSec = currentElapsedSecLocked(),
-            )
-        }
-        emitStats()
-    }
-
-    private fun resetStatsLocked() {
-        synchronized(statsLock) {
-            stats = RecordingStats()
-            totalWriteMs = 0.0
-            dropStatusCounter = 0L
-        }
-        emitStats()
-    }
-
-    private fun currentElapsedSecLocked(): Int {
-        val start = recordingStartedRealtimeMs
-        if (start <= 0L) {
-            return stats.elapsedSec
-        }
-
-        val end = if (isRecording.get()) {
-            SystemClock.elapsedRealtime()
-        } else {
-            if (recordingStoppedRealtimeMs > 0L) recordingStoppedRealtimeMs else SystemClock.elapsedRealtime()
-        }
-
-        return ((end - start).coerceAtLeast(0L) / 1000L).toInt()
-    }
-
-    private fun emitStats() {
-        val snapshot = synchronized(statsLock) { stats }
-        mainHandler.post {
-            listener.onStats(snapshot)
-        }
-    }
-
-    private fun processPendingPair(timestampNs: Long) {
-        val pendingImage = imageByTimestamp[timestampNs] ?: return
-        val captureResult = resultByTimestamp[timestampNs] ?: return
-
-        imageByTimestamp.remove(timestampNs)
-        resultByTimestamp.remove(timestampNs)
-        imageOrder.remove(timestampNs)
-        resultOrder.remove(timestampNs)
-
-        when (pendingImage.kind) {
-            PendingKind.PHOTO -> {
-                val task = FrameWriteTask(
-                    image = pendingImage.image,
-                    result = captureResult,
-                    fileName = "IMG_${timestampLabel()}.dng",
-                    relativePath = "$DEFAULT_RELATIVE_PATH/Photos",
-                    updateRecordingStats = false,
-                    frameIndex = 0L,
-                )
-                if (!submitWriteTask(task, dropReason = "photo_write_queue_overflow")) {
-                    pendingImage.image.close()
-                }
-            }
-
-            PendingKind.RECORD -> {
-                val task = FrameWriteTask(
-                    image = pendingImage.image,
-                    result = captureResult,
-                    fileName = "frame_${pendingImage.frameIndex.toString().padStart(6, '0')}.dng",
-                    relativePath = recordingRelativePath,
-                    updateRecordingStats = true,
-                    frameIndex = pendingImage.frameIndex,
-                )
-                if (!submitWriteTask(task, dropReason = "record_write_queue_overflow")) {
-                    pendingImage.image.close()
-                }
-            }
-        }
-    }
-
-    private fun trimPendingBuffers() {
-        while (resultOrder.size > MAX_RESULT_CACHE) {
-            val oldest = resultOrder.removeFirstOrNull() ?: break
-            resultByTimestamp.remove(oldest)
-        }
-
-        while (imageOrder.size > MAX_RESULT_CACHE) {
-            val oldest = imageOrder.removeFirstOrNull() ?: break
-            val stale = imageByTimestamp.remove(oldest) ?: continue
-            stale.image.close()
-            if (stale.kind == PendingKind.RECORD) {
-                onFrameDropped("stale_image_without_result")
-            }
-        }
-    }
-
-    private fun clearPendingBuffers() {
-        imageByTimestamp.values.forEach { pending ->
-            runCatching { pending.image.close() }
-        }
-        imageByTimestamp.clear()
-        imageOrder.clear()
-        resultByTimestamp.clear()
-        resultOrder.clear()
+        framePipeline.onRawImage(image)
     }
 
     private fun adaptRawSizeForResolution(target: ResolutionOption) {
@@ -983,54 +798,52 @@ class RawCameraController(
 
         selectedRawSize = adapted
         selectedAspectRatio = AspectRatioOption.fromResolution(adapted.width, adapted.height)
-        cameraHandler.post {
-            if (!isRecording.get() && cameraDevice != null) {
-                configureSession()
-            }
-        }
     }
 
-    private fun pickPreviewSize(textureWidth: Int, textureHeight: Int): Size {
-        val previews = availablePreviewSizes
-        if (previews.isEmpty()) {
-            return Size(textureWidth, textureHeight)
-        }
-
-        val targetRatio = selectedAspectRatio?.ratio
-            ?: selectedRawSize?.aspectRatio
-            ?: (textureWidth.toDouble() / textureHeight.toDouble())
-        val targetArea = textureWidth.toLong() * textureHeight.toLong()
-
-        val sorted = previews.sortedBy { size ->
-            val aspect = size.width.toDouble() / size.height.toDouble()
-            val aspectPenalty = abs(aspect - targetRatio) * 10_000.0
-            val areaPenalty = abs(size.width.toLong() * size.height.toLong() - targetArea).toDouble() / 1_000.0
-            aspectPenalty + areaPenalty
-        }
-
-        return sorted.first()
+    private fun pickPreviewSize(viewWidth: Int, viewHeight: Int): Size {
+        return previewSizeSelector.select(
+            PreviewSizeSelectionInput(
+                availableSizes = availablePreviewSizes,
+                viewportWidth = viewWidth,
+                viewportHeight = viewHeight,
+                targetCaptureAspectRatio = selectedAspectRatio?.ratio ?: selectedRawSize?.aspectRatio,
+                targetCaptureArea = selectedRawSize?.area,
+            ),
+        )
     }
 
     private fun applyPreviewTransform(textureView: TextureView, previewSize: Size) {
         textureView.post {
-            val viewWidth = textureView.width.toFloat()
-            val viewHeight = textureView.height.toFloat()
-            if (viewWidth <= 0f || viewHeight <= 0f) {
+            val viewWidth = textureView.width
+            val viewHeight = textureView.height
+            if (viewWidth <= 0 || viewHeight <= 0) {
                 return@post
             }
 
-            val bufferRect = RectF(0f, 0f, previewSize.width.toFloat(), previewSize.height.toFloat())
-            val viewRect = RectF(0f, 0f, viewWidth, viewHeight)
-            val matrix = Matrix()
+            val chars = cameraCharacteristics
+            val sensorOrientation = chars?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            val lensFacing = chars?.get(CameraCharacteristics.LENS_FACING)
+            val displayRotation = textureView.display?.rotation ?: Surface.ROTATION_0
 
-            matrix.setRectToRect(bufferRect, viewRect, Matrix.ScaleToFit.CENTER)
-
-            val scale = max(
-                viewWidth / previewSize.width.toFloat(),
-                viewHeight / previewSize.height.toFloat(),
+            val transform = previewViewportCalculator.calculate(
+                PreviewViewportInput(
+                    viewWidth = viewWidth,
+                    viewHeight = viewHeight,
+                    bufferSize = previewSize,
+                    sensorOrientation = sensorOrientation,
+                    displayRotation = displayRotation,
+                    lensFacing = lensFacing,
+                    fillCenterCrop = true,
+                ),
             )
-            matrix.postScale(scale, scale, viewWidth / 2f, viewHeight / 2f)
-            textureView.setTransform(matrix)
+            textureView.setTransform(transform.matrix)
+
+            val crop = transform.cropRectInBuffer
+            val debugLine = "Preview ${previewSize.width}x${previewSize.height} | rot=${transform.sensorToDisplayRotationDegrees} | crop=${crop.left.toInt()},${crop.top.toInt()},${crop.right.toInt()},${crop.bottom.toInt()}"
+            if (debugLine != previewDebugInfo) {
+                previewDebugInfo = debugLine
+                postPreviewDebug(debugLine)
+            }
         }
     }
 
@@ -1099,24 +912,14 @@ class RawCameraController(
         applyExposureAndIso()
         applyStabilization()
 
-        if (supportsAberrationHighQuality()) {
-            set(
-                CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE,
-                CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY,
-            )
-        }
-        set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_HIGH_QUALITY)
-
-        if (supportsShadingHighQuality()) {
-            set(CaptureRequest.SHADING_MODE, CaptureRequest.SHADING_MODE_HIGH_QUALITY)
-        }
+        set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
 
         val fpsRange = pickFpsRange(targetFps)
         if (fpsRange != null) {
             set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
         }
 
-        if (includeRaw && supportsLensShadingMapMode()) {
+        if (supportsLensShadingMapMode()) {
             set(
                 CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE,
                 CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE_ON,
@@ -1131,7 +934,8 @@ class RawCameraController(
     }
 
     private fun CaptureRequest.Builder.applyExposureAndIso() {
-        val manual = manualSensorEnabled &&
+        val manual = !isRecording.get() &&
+            manualSensorEnabled &&
             supportsManualSensorControls &&
             selectedIso != null &&
             selectedExposureTimeNs != null
@@ -1153,54 +957,34 @@ class RawCameraController(
 
     private fun CaptureRequest.Builder.applyStabilization() {
         val chars = cameraCharacteristics ?: return
-        val enableDuringRecording = videoStabilizationEnabled &&
-            isRecording.get() &&
-            (recordingMode == CaptureMode.VIDEO || recordingMode == CaptureMode.STRESS)
+        val shouldEnable = videoStabilizationEnabled && currentMode != CaptureMode.PHOTO
 
         val videoModes = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: intArrayOf()
         val canUseVideoStab = videoModes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
         if (canUseVideoStab) {
             set(
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
-                if (enableDuringRecording) {
-                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
-                } else {
-                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
-                },
+                if (shouldEnable) CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                else CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF,
             )
         }
 
         val oisModes = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: intArrayOf()
         val canUseOis = oisModes.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
         if (canUseOis) {
-            val oisOn = enableDuringRecording && !canUseVideoStab
+            val oisOn = shouldEnable && !canUseVideoStab
             set(
                 CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
-                if (oisOn) {
-                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
-                } else {
-                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
-                },
+                if (oisOn) CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+                else CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF,
             )
         }
-    }
-
-    private fun supportsAberrationHighQuality(): Boolean {
-        val chars = cameraCharacteristics ?: return false
-        val modes = chars.get(CameraCharacteristics.COLOR_CORRECTION_AVAILABLE_ABERRATION_MODES) ?: return false
-        return modes.contains(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY)
     }
 
     private fun supportsLensShadingMapMode(): Boolean {
         val chars = cameraCharacteristics ?: return false
         val modes = chars.get(CameraCharacteristics.STATISTICS_INFO_AVAILABLE_LENS_SHADING_MAP_MODES) ?: return false
         return modes.contains(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE_ON)
-    }
-
-    private fun supportsShadingHighQuality(): Boolean {
-        val chars = cameraCharacteristics ?: return false
-        val modes = chars.get(CameraCharacteristics.SHADING_AVAILABLE_MODES) ?: return false
-        return modes.contains(CaptureRequest.SHADING_MODE_HIGH_QUALITY)
     }
 
     private fun scheduleRecovery() {
@@ -1224,7 +1008,7 @@ class RawCameraController(
             CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE ->
                 "Ошибка камеры: достигнут лимит одновременно открытых камер"
             CameraDevice.StateCallback.ERROR_CAMERA_DISABLED ->
-                "Ошибка камеры: доступ временно отключен политикой устройства"
+                "Ошибка камеры: доступ временно отключен системой (код 3)"
             CameraDevice.StateCallback.ERROR_CAMERA_DEVICE ->
                 "Ошибка камеры: сбой устройства камеры"
             CameraDevice.StateCallback.ERROR_CAMERA_SERVICE ->
@@ -1237,9 +1021,12 @@ class RawCameraController(
         val chars = cameraCharacteristics ?: return null
         val ranges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
 
-        val exact = ranges.firstOrNull { it.lower <= target && it.upper >= target }
-        if (exact != null) {
-            return Range(target, target).takeIf { target in exact.lower..exact.upper } ?: exact
+        val exact = ranges.filter { target in it.lower..it.upper }
+        if (exact.isNotEmpty()) {
+            return exact.minByOrNull {
+                val span = it.upper - it.lower
+                span * 10 + abs(it.upper - target)
+            }
         }
 
         return ranges.maxByOrNull { it.upper }
@@ -1285,6 +1072,10 @@ class RawCameraController(
 
     private fun postRecordingState(isRecording: Boolean, sessionLabel: String?) {
         mainHandler.post { listener.onRecordingStateChanged(isRecording, sessionLabel) }
+    }
+
+    private fun postPreviewDebug(info: String) {
+        mainHandler.post { listener.onPreviewDebug(info) }
     }
 
     private fun postError(message: String, throwable: Throwable? = null) {

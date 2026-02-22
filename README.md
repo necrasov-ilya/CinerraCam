@@ -1,46 +1,60 @@
-﻿# CinerraCam
+# CinerraCam
 
-CinerraCam is an Android Camera2 project with a DNG-first recording pipeline.
+CinerraCam — Android-проект на `Camera2 API` с фокусом на `DNG-first` RAW-пайплайн.
 
-Current implementation focus:
+## Текущая реализация
 
-- Multi-module architecture (`app`, `core`, `camera2`, `pipeline`, `storage-dng`, `native-writer`, `benchmark`)
-- Real Camera2 + `RAW_SENSOR` capture flow in app UI
-- Camera modes: `Photo`, `RAW Video`, `Stress Test`
-- In-app settings: RAW size, FPS, stress-test duration
-- Live load metrics: captured/written/dropped, avg write time, queue high-watermark, elapsed time
-- DNG output saved to dedicated album path `DCIM/CinerraCam` (not Downloads)
-- App launcher icon integrated from `app/src/main/res/drawable/ic_launcher.png`
+- Камера: только `Camera2 API` + `RAW_SENSOR` (без CameraX).
+- Режимы: `Фото`, `Видео RAW`, `Тест`.
+- Новый UX камеры:
+  - полноширинный верхний бар (`CinerraCam` + статус + настройки),
+  - обычный прямоугольный видоискатель,
+  - нижняя панель с mode strip + кнопкой затвора + `PARAM`.
+- Гибридные настройки:
+  - `QuickSettingsDrawer` для быстрых live-параметров,
+  - `ProSettingsSheet` для расширенной конфигурации.
+- Preview:
+  - матрица `fill+crop` через `PreviewViewportCalculator`,
+  - выбор preview-размера по аспекту/viewport через `PreviewSizeSelector`.
+- Пайплайн записи:
+  - сопоставление `Image` + `CaptureResult` по timestamp,
+  - ограниченная очередь записи и учёт dropped frames.
+- Путь сохранения: `DCIM/CinerraCam` (отдельный альбом, не Downloads).
 
-## Project Structure
+## Модули
 
-- `app/` Compose UI, view model, and integration entrypoints
-- `core/` Public contracts and shared models
-- `camera2/` Camera2 capability/session components
-- `pipeline/` Queueing and frame write orchestration
-- `storage-dng/` DNG writing and manifest persistence
-- `native-writer/` JNI + C++ hot-path scaffold
-- `benchmark/` Perf summary utilities
-- `docs/` Architecture ADRs and test plans
+- `app/` — UI и orchestration.
+- `core/` — публичные контракты и модели.
+- `camera2/` — утилиты Camera2 (capabilities, preview transform, session helpers).
+- `pipeline/` — абстракции очередей и backpressure.
+- `storage-dng/` — компоненты сохранения DNG/manifest.
+- `native-writer/` — JNI + C++ каркас hot-path.
+- `benchmark/` — локальные benchmark-сценарии и парсинг метрик.
 
-## Local Setup
+## Сборка
 
-1. Install Android SDK and set `sdk.dir` in `local.properties`.
-2. Run `gradlew.bat help` (Windows) or `./gradlew help` (Unix).
-3. Open project in Android Studio (AGP 8.5.2, JDK 17).
-4. Build/install app:
-   - `gradlew.bat :app:assembleDebug`
-   - `gradlew.bat :app:installDebug`
+1. Установите Android SDK (JDK 17).
+2. Настройте `local.properties` (`sdk.dir=...`).
+3. Соберите debug:
+   - Windows: `gradlew.bat :app:assembleDebug`
+   - Unix: `./gradlew :app:assembleDebug`
 
-## Vivo Test Flow
+### Native Writer (опционально)
 
-1. Grant camera permission on first launch.
-2. Select RAW size and FPS in settings.
-3. Use `Photo` mode for single DNG capture.
-4. Use `RAW Video` mode for continuous DNG sequence recording.
-5. Use `Stress Test` mode to run fixed-duration high-load recording and observe live metrics.
-6. Verify output in gallery/file manager under `DCIM/CinerraCam`.
+- По умолчанию native-ветка отключена.
+- Чтобы включить сборку native writer:
+  - установите Android NDK + CMake через SDK Manager в Android Studio,
+  - запускайте сборку с флагом `-PenableNativeWriter=true`.
 
-Note: project path contains non-ASCII characters, so `android.overridePathCheck=true` is enabled in `gradle.properties`.
-Native C++ build in `native-writer` is disabled by default; enable it with `-PenableNativeWriter=true`.
+## Команды проверки
 
+- Guardrail по размеру файлов `app`:
+  - `powershell -ExecutionPolicy Bypass -File scripts/check_app_file_lengths.ps1`
+- Debug-сборка:
+  - `gradlew.bat :app:assembleDebug`
+
+## Документация
+
+- Архитектура: `docs/architecture.md`
+- План тестирования: `docs/testing-plan.md`
+- Базовое ADR: `docs/adr/ADR-0001-dng-first.md`

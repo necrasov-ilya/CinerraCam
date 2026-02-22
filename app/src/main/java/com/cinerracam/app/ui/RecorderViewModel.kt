@@ -20,7 +20,7 @@ data class RecorderUiState(
     val hasCameraPermission: Boolean = false,
     val cameraId: String? = null,
     val mode: CaptureMode = CaptureMode.PHOTO,
-    val statusMessage: String = "Need camera permission",
+    val statusMessage: String = "Нужно разрешение на камеру",
     val rawSizes: List<RawSizeOption> = emptyList(),
     val selectedRawSize: RawSizeOption? = null,
     val photoResolutions: List<ResolutionOption> = emptyList(),
@@ -50,6 +50,8 @@ data class RecorderUiState(
     val selectedExposureTimeNs: Long? = null,
     val supportsVideoStabilization: Boolean = false,
     val videoStabilizationEnabled: Boolean = false,
+    val previewDebugInfo: String = "",
+    val hapticsIntensity: HapticsIntensity = HapticsIntensity.NORMAL,
 )
 
 class RecorderViewModel(application: Application) : AndroidViewModel(application), RawCameraController.Listener {
@@ -62,11 +64,15 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
     private val mutableState = MutableStateFlow(RecorderUiState())
     val uiState: StateFlow<RecorderUiState> = mutableState.asStateFlow()
 
+    private inline fun reduce(crossinline transform: (RecorderUiState) -> RecorderUiState) {
+        mutableState.update { current -> transform(current) }
+    }
+
     fun onCameraPermissionChanged(granted: Boolean) {
-        mutableState.update {
+        reduce {
             it.copy(
                 hasCameraPermission = granted,
-                statusMessage = if (granted) "Initializing camera..." else "Need camera permission",
+                statusMessage = if (granted) "Инициализация камеры..." else "Нужно разрешение на камеру",
             )
         }
         controller.onPermissionChanged(granted)
@@ -82,91 +88,95 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
 
     fun onModeSelected(mode: CaptureMode) {
         if (uiState.value.isRecording) {
-            mutableState.update { it.copy(statusMessage = "Stop recording before mode switch") }
+            reduce { it.copy(statusMessage = "Остановите запись перед сменой режима") }
             return
         }
 
-        mutableState.update { it.copy(mode = mode) }
+        reduce { it.copy(mode = mode) }
         controller.onModeChanged(mode)
     }
 
     fun onRawSizeSelected(option: RawSizeOption) {
         if (uiState.value.isRecording) {
-            mutableState.update { it.copy(statusMessage = "Stop recording before RAW size switch") }
+            reduce { it.copy(statusMessage = "Остановите запись перед сменой RAW-размера") }
             return
         }
 
-        mutableState.update { it.copy(selectedRawSize = option) }
+        reduce { it.copy(selectedRawSize = option) }
         controller.setRawSize(option)
     }
 
     fun onPhotoResolutionSelected(option: ResolutionOption) {
         if (uiState.value.isRecording) {
-            mutableState.update { it.copy(statusMessage = "Stop recording before photo resolution switch") }
+            reduce { it.copy(statusMessage = "Остановите запись перед сменой разрешения фото") }
             return
         }
 
-        mutableState.update { it.copy(selectedPhotoResolution = option) }
+        reduce { it.copy(selectedPhotoResolution = option) }
         controller.setPhotoResolution(option)
     }
 
     fun onVideoResolutionSelected(option: ResolutionOption) {
         if (uiState.value.isRecording) {
-            mutableState.update { it.copy(statusMessage = "Stop recording before video resolution switch") }
+            reduce { it.copy(statusMessage = "Остановите запись перед сменой разрешения видео") }
             return
         }
 
-        mutableState.update { it.copy(selectedVideoResolution = option) }
+        reduce { it.copy(selectedVideoResolution = option) }
         controller.setVideoResolution(option)
     }
 
     fun onAspectRatioSelected(option: AspectRatioOption) {
         if (uiState.value.isRecording) {
-            mutableState.update { it.copy(statusMessage = "Stop recording before format switch") }
+            reduce { it.copy(statusMessage = "Остановите запись перед сменой формата кадра") }
             return
         }
 
-        mutableState.update { it.copy(selectedAspectRatio = option) }
+        reduce { it.copy(selectedAspectRatio = option) }
         controller.setAspectRatio(option)
     }
 
     fun onFpsSelected(fps: Int) {
-        mutableState.update { it.copy(selectedFps = fps) }
+        reduce { it.copy(selectedFps = fps) }
         controller.setTargetFps(fps)
     }
 
     fun onWhiteBalanceSelected(preset: WhiteBalancePreset) {
-        mutableState.update { it.copy(selectedWhiteBalance = preset) }
+        reduce { it.copy(selectedWhiteBalance = preset) }
         controller.setWhiteBalancePreset(preset)
     }
 
     fun onVideoStabilizationChanged(enabled: Boolean) {
-        mutableState.update { it.copy(videoStabilizationEnabled = enabled) }
+        reduce { it.copy(videoStabilizationEnabled = enabled) }
         controller.setVideoStabilizationEnabled(enabled)
     }
 
     fun onExposureCompensationChanged(value: Int) {
-        mutableState.update { it.copy(exposureCompensationValue = value) }
+        reduce { it.copy(exposureCompensationValue = value) }
         controller.setExposureCompensation(value)
     }
 
     fun onManualSensorEnabledChanged(enabled: Boolean) {
-        mutableState.update { it.copy(manualSensorEnabled = enabled) }
+        reduce { it.copy(manualSensorEnabled = enabled) }
         controller.setManualSensorEnabled(enabled)
     }
 
     fun onIsoChanged(iso: Int?) {
-        mutableState.update { it.copy(selectedIso = iso) }
+        reduce { it.copy(selectedIso = iso) }
         controller.setManualIso(iso)
     }
 
     fun onExposureTimeChanged(exposureTimeNs: Long?) {
-        mutableState.update { it.copy(selectedExposureTimeNs = exposureTimeNs) }
+        reduce { it.copy(selectedExposureTimeNs = exposureTimeNs) }
         controller.setManualExposureTimeNs(exposureTimeNs)
     }
 
     fun onStressDurationChanged(seconds: Int) {
-        mutableState.update { it.copy(stressDurationSec = seconds.coerceIn(5, 120)) }
+        reduce { it.copy(stressDurationSec = seconds.coerceIn(5, 120)) }
+    }
+
+    fun onHapticsIntensityChanged(intensity: HapticsIntensity) {
+        reduce { it.copy(hapticsIntensity = intensity) }
     }
 
     fun onPrimaryActionClick() {
@@ -183,7 +193,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
     }
 
     override fun onCameraReady(snapshot: CameraCapabilitiesSnapshot) {
-        mutableState.update {
+        reduce {
             it.copy(
                 cameraId = snapshot.cameraId,
                 rawSizes = snapshot.rawSizes,
@@ -207,17 +217,17 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
                 manualSensorEnabled = snapshot.manualSensorEnabled,
                 supportsVideoStabilization = snapshot.supportsVideoStabilization,
                 videoStabilizationEnabled = snapshot.videoStabilizationEnabled,
-                statusMessage = "Camera ready: ${snapshot.cameraId}",
+                statusMessage = "Камера готова: ${snapshot.cameraId}",
             )
         }
     }
 
     override fun onStatus(message: String) {
-        mutableState.update { it.copy(statusMessage = message) }
+        reduce { it.copy(statusMessage = message) }
     }
 
     override fun onRecordingStateChanged(isRecording: Boolean, sessionLabel: String?) {
-        mutableState.update {
+        reduce {
             it.copy(
                 isRecording = isRecording,
                 sessionLabel = sessionLabel,
@@ -226,11 +236,15 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
     }
 
     override fun onStats(stats: RecordingStats) {
-        mutableState.update { it.copy(stats = stats) }
+        reduce { it.copy(stats = stats) }
     }
 
     override fun onLastSaved(uriString: String) {
-        mutableState.update { it.copy(lastSavedUri = uriString) }
+        reduce { it.copy(lastSavedUri = uriString) }
+    }
+
+    override fun onPreviewDebug(info: String) {
+        reduce { it.copy(previewDebugInfo = info) }
     }
 
     override fun onError(message: String, throwable: Throwable?) {
@@ -242,7 +256,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
                 append(details)
             }
         }
-        mutableState.update { it.copy(statusMessage = fullMessage) }
+        reduce { it.copy(statusMessage = fullMessage) }
     }
 
     override fun onCleared() {
