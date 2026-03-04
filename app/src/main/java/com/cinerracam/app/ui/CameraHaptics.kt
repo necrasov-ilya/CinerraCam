@@ -18,6 +18,7 @@ enum class CameraHapticEvent {
     PARAMETER_APPLY,
     LOCK_WARNING,
     ERROR,
+    FOCUS_ACQUIRED,
 }
 
 interface CameraHapticEngine {
@@ -45,34 +46,18 @@ private class AndroidCameraHapticEngine(
     private var lastModeSwitchMs: Long = 0L
 
     override fun perform(event: CameraHapticEvent, intensity: HapticsIntensity) {
-        if (intensity == HapticsIntensity.OFF) {
-            return
-        }
-
+        if (intensity == HapticsIntensity.OFF) return
         val vib = vibrator ?: return
-        if (!vib.hasVibrator()) {
-            return
-        }
+        if (!vib.hasVibrator()) return
 
         val now = SystemClock.elapsedRealtime()
-        if (event == CameraHapticEvent.PARAMETER_APPLY && now - lastParameterApplyMs < 80L) {
-            return
-        }
-        if (event == CameraHapticEvent.MODE_SWITCH && now - lastModeSwitchMs < 120L) {
-            return
-        }
+        if (event == CameraHapticEvent.PARAMETER_APPLY && now - lastParameterApplyMs < 60L) return
+        if (event == CameraHapticEvent.MODE_SWITCH && now - lastModeSwitchMs < 100L) return
 
-        val effect = buildEffect(event, intensity)
-        if (effect == null) {
-            return
-        }
+        val effect = buildEffect(event, intensity) ?: return
 
-        if (event == CameraHapticEvent.PARAMETER_APPLY) {
-            lastParameterApplyMs = now
-        }
-        if (event == CameraHapticEvent.MODE_SWITCH) {
-            lastModeSwitchMs = now
-        }
+        if (event == CameraHapticEvent.PARAMETER_APPLY) lastParameterApplyMs = now
+        if (event == CameraHapticEvent.MODE_SWITCH) lastModeSwitchMs = now
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             vib.vibrate(effect)
@@ -82,46 +67,73 @@ private class AndroidCameraHapticEngine(
         }
     }
 
-    private fun buildEffect(
-        event: CameraHapticEvent,
-        intensity: HapticsIntensity,
-    ): VibrationEffect? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return null
-        }
+    private fun buildEffect(event: CameraHapticEvent, intensity: HapticsIntensity): VibrationEffect? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
 
-        val ampSoft = when (intensity) {
+        val ampLight = when (intensity) {
             HapticsIntensity.OFF -> 0
-            HapticsIntensity.NORMAL -> 110
-            HapticsIntensity.RICH -> 160
+            HapticsIntensity.NORMAL -> 80
+            HapticsIntensity.RICH -> 130
         }
-        val ampStrong = when (intensity) {
+        val ampMedium = when (intensity) {
             HapticsIntensity.OFF -> 0
-            HapticsIntensity.NORMAL -> 170
+            HapticsIntensity.NORMAL -> 130
+            HapticsIntensity.RICH -> 190
+        }
+        val ampHeavy = when (intensity) {
+            HapticsIntensity.OFF -> 0
+            HapticsIntensity.NORMAL -> 190
             HapticsIntensity.RICH -> 255
         }
 
         return when (event) {
             CameraHapticEvent.MODE_SWITCH ->
-                VibrationEffect.createOneShot(18L, ampSoft)
+                VibrationEffect.createWaveform(
+                    longArrayOf(0, 8, 6, 10),
+                    intArrayOf(0, ampMedium, 0, ampLight),
+                    -1,
+                )
 
             CameraHapticEvent.SHUTTER_TAP ->
-                VibrationEffect.createWaveform(longArrayOf(0L, 16L, 22L, 24L), intArrayOf(0, ampSoft, 0, ampStrong), -1)
+                VibrationEffect.createWaveform(
+                    longArrayOf(0, 6, 4, 8, 6, 12, 4, 10),
+                    intArrayOf(0, ampHeavy, 0, ampMedium, 0, ampHeavy, 0, ampLight),
+                    -1,
+                )
 
             CameraHapticEvent.RECORD_START ->
-                VibrationEffect.createWaveform(longArrayOf(0L, 22L, 30L, 34L), intArrayOf(0, ampStrong, 0, ampSoft), -1)
+                VibrationEffect.createWaveform(
+                    longArrayOf(0, 14, 10, 20, 8, 14),
+                    intArrayOf(0, ampHeavy, 0, ampMedium, 0, ampLight),
+                    -1,
+                )
 
             CameraHapticEvent.RECORD_STOP ->
-                VibrationEffect.createOneShot(28L, ampStrong)
+                VibrationEffect.createWaveform(
+                    longArrayOf(0, 10, 8, 18),
+                    intArrayOf(0, ampMedium, 0, ampHeavy),
+                    -1,
+                )
 
             CameraHapticEvent.PARAMETER_APPLY ->
-                VibrationEffect.createOneShot(12L, ampSoft)
+                VibrationEffect.createOneShot(8L, ampLight)
 
             CameraHapticEvent.LOCK_WARNING ->
-                VibrationEffect.createWaveform(longArrayOf(0L, 18L, 28L, 18L), intArrayOf(0, ampSoft, 0, ampSoft), -1)
+                VibrationEffect.createWaveform(
+                    longArrayOf(0, 14, 20, 14),
+                    intArrayOf(0, ampMedium, 0, ampMedium),
+                    -1,
+                )
 
             CameraHapticEvent.ERROR ->
-                VibrationEffect.createWaveform(longArrayOf(0L, 26L, 28L, 26L), intArrayOf(0, ampStrong, 0, ampStrong), -1)
+                VibrationEffect.createWaveform(
+                    longArrayOf(0, 20, 16, 20, 16, 20),
+                    intArrayOf(0, ampHeavy, 0, ampHeavy, 0, ampHeavy),
+                    -1,
+                )
+
+            CameraHapticEvent.FOCUS_ACQUIRED ->
+                VibrationEffect.createOneShot(6L, ampLight)
         }
     }
 }

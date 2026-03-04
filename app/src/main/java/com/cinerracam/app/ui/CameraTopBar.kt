@@ -1,13 +1,11 @@
 package com.cinerracam.app.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -22,69 +20,37 @@ import androidx.compose.ui.text.font.FontWeight
 fun CameraTopBar(
     state: RecorderUiState,
     onRequestCameraPermission: () -> Unit,
-    onOpenProSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val status = rememberStatusChip(state)
 
     Row(
         modifier = modifier
-            .background(CameraColors.Surface)
+            .background(Color.Transparent)
             .clickable(enabled = !state.hasCameraPermission, onClick = onRequestCameraPermission)
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             text = "CinerraCam",
             color = CameraColors.TextPrimary,
-            style = MaterialTheme.typography.headlineMedium,
+            style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
         )
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        Box(
+            modifier = Modifier
+                .background(status.background, RoundedCornerShape(999.dp))
+                .padding(horizontal = 12.dp, vertical = 5.dp),
         ) {
-            Box(
-                modifier = Modifier
-                    .background(status.background, RoundedCornerShape(999.dp))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-            ) {
-                Text(
-                    text = status.text,
-                    color = status.content,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-
-            SquareIconButton(
-                label = "SET",
-                onClick = onOpenProSettings,
+            Text(
+                text = status.text,
+                color = status.content,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
             )
         }
-    }
-}
-
-@Composable
-private fun SquareIconButton(
-    label: String,
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier = Modifier
-            .size(42.dp)
-            .border(width = 1.dp, color = CameraColors.BorderStrong)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = CameraColors.TextPrimary,
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-        )
     }
 }
 
@@ -102,11 +68,11 @@ private fun rememberStatusChip(state: RecorderUiState): StatusChip {
 
     val lowered = state.statusMessage.lowercase()
     return when {
-        state.isRecording -> StatusChip("REC", CameraColors.Accent, CameraColors.TextPrimary)
+        state.isRecording -> StatusChip("REC", CameraColors.Recording, CameraColors.TextPrimary)
         lowered.contains("ошибка") || lowered.contains("error") ->
             StatusChip("ОШИБКА", CameraColors.Error, CameraColors.TextPrimary)
         lowered.contains("готов") || lowered.contains("ready") ->
-            StatusChip("ГОТОВО", Color(0xFF1C1C1C), CameraColors.TextPrimary)
+            StatusChip("ГОТОВО", CameraColors.AccentGreen.copy(alpha = 0.2f), CameraColors.AccentGreen)
         else -> StatusChip("INIT", Color(0xFF1C1C1C), CameraColors.TextSecondary)
     }
 }

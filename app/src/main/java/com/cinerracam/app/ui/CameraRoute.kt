@@ -17,8 +17,8 @@ fun CinerraCamApp(viewModel: RecorderViewModel) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val hapticEngine = rememberCameraHapticEngine()
 
-    var quickSettingsOpen by remember { mutableStateOf(false) }
-    var proSettingsOpen by remember { mutableStateOf(false) }
+    var fullSettingsOpen by remember { mutableStateOf(false) }
+    var activeQuickControl by remember { mutableStateOf<QuickControl?>(null) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -33,19 +33,26 @@ fun CinerraCamApp(viewModel: RecorderViewModel) {
 
     CameraScaffold(
         state = state,
-        quickSettingsOpen = quickSettingsOpen,
-        proSettingsOpen = proSettingsOpen,
+        fullSettingsOpen = fullSettingsOpen,
+        activeQuickControl = activeQuickControl,
         onPreviewTextureReady = viewModel::onPreviewTextureReady,
         onRequestCameraPermission = { permissionLauncher.launch(Manifest.permission.CAMERA) },
-        onOpenQuickSettings = { quickSettingsOpen = true },
-        onCloseQuickSettings = { quickSettingsOpen = false },
-        onOpenProSettings = { proSettingsOpen = true },
-        onCloseProSettings = { proSettingsOpen = false },
+        onOpenFullSettings = {
+            activeQuickControl = null
+            fullSettingsOpen = true
+        },
+        onCloseFullSettings = { fullSettingsOpen = false },
+        onQuickControlTap = { control ->
+            hapticEngine.perform(CameraHapticEvent.PARAMETER_APPLY, state.hapticsIntensity)
+            activeQuickControl = control
+        },
         onModeSelected = { mode ->
             hapticEngine.perform(CameraHapticEvent.MODE_SWITCH, state.hapticsIntensity)
+            activeQuickControl = null
             viewModel.onModeSelected(mode)
         },
         onPrimaryActionClick = {
+            activeQuickControl = null
             val event = when {
                 state.mode == CaptureMode.PHOTO -> CameraHapticEvent.SHUTTER_TAP
                 state.isRecording -> CameraHapticEvent.RECORD_STOP
@@ -54,36 +61,36 @@ fun CinerraCamApp(viewModel: RecorderViewModel) {
             hapticEngine.perform(event, state.hapticsIntensity)
             viewModel.onPrimaryActionClick()
         },
+        onTouchToFocus = { normX, normY ->
+            hapticEngine.perform(CameraHapticEvent.PARAMETER_APPLY, state.hapticsIntensity)
+            viewModel.onTouchToFocus(normX, normY)
+        },
         onRawSizeSelected = { option ->
-            if (state.isRecording) {
-                hapticEngine.perform(CameraHapticEvent.LOCK_WARNING, state.hapticsIntensity)
-            } else {
-                hapticEngine.perform(CameraHapticEvent.PARAMETER_APPLY, state.hapticsIntensity)
-            }
+            hapticEngine.perform(
+                if (state.isRecording) CameraHapticEvent.LOCK_WARNING else CameraHapticEvent.PARAMETER_APPLY,
+                state.hapticsIntensity,
+            )
             viewModel.onRawSizeSelected(option)
         },
         onPhotoResolutionSelected = { option ->
-            if (state.isRecording) {
-                hapticEngine.perform(CameraHapticEvent.LOCK_WARNING, state.hapticsIntensity)
-            } else {
-                hapticEngine.perform(CameraHapticEvent.PARAMETER_APPLY, state.hapticsIntensity)
-            }
+            hapticEngine.perform(
+                if (state.isRecording) CameraHapticEvent.LOCK_WARNING else CameraHapticEvent.PARAMETER_APPLY,
+                state.hapticsIntensity,
+            )
             viewModel.onPhotoResolutionSelected(option)
         },
         onVideoResolutionSelected = { option ->
-            if (state.isRecording) {
-                hapticEngine.perform(CameraHapticEvent.LOCK_WARNING, state.hapticsIntensity)
-            } else {
-                hapticEngine.perform(CameraHapticEvent.PARAMETER_APPLY, state.hapticsIntensity)
-            }
+            hapticEngine.perform(
+                if (state.isRecording) CameraHapticEvent.LOCK_WARNING else CameraHapticEvent.PARAMETER_APPLY,
+                state.hapticsIntensity,
+            )
             viewModel.onVideoResolutionSelected(option)
         },
         onAspectRatioSelected = { option ->
-            if (state.isRecording) {
-                hapticEngine.perform(CameraHapticEvent.LOCK_WARNING, state.hapticsIntensity)
-            } else {
-                hapticEngine.perform(CameraHapticEvent.PARAMETER_APPLY, state.hapticsIntensity)
-            }
+            hapticEngine.perform(
+                if (state.isRecording) CameraHapticEvent.LOCK_WARNING else CameraHapticEvent.PARAMETER_APPLY,
+                state.hapticsIntensity,
+            )
             viewModel.onAspectRatioSelected(option)
         },
         onFpsSelected = {
@@ -102,6 +109,16 @@ fun CinerraCamApp(viewModel: RecorderViewModel) {
         onManualSensorEnabledChanged = viewModel::onManualSensorEnabledChanged,
         onIsoChanged = viewModel::onIsoChanged,
         onExposureTimeChanged = viewModel::onExposureTimeChanged,
+        onFlashModeChanged = {
+            hapticEngine.perform(CameraHapticEvent.PARAMETER_APPLY, state.hapticsIntensity)
+            viewModel.onFlashModeChanged(it)
+        },
+        onAfModeChanged = {
+            hapticEngine.perform(CameraHapticEvent.PARAMETER_APPLY, state.hapticsIntensity)
+            viewModel.onAfModeChanged(it)
+        },
+        onZoomRatioChanged = viewModel::onZoomRatioChanged,
+        onGridToggle = viewModel::onGridToggle,
         onStressDurationChanged = viewModel::onStressDurationChanged,
         onHapticsIntensityChanged = viewModel::onHapticsIntensityChanged,
     )

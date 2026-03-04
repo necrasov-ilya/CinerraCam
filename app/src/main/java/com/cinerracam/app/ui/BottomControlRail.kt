@@ -1,7 +1,8 @@
 package com.cinerracam.app.ui
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.animateIntOffsetAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,12 +28,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.cinerracam.app.camera.CaptureMode
 
 @Composable
@@ -39,110 +43,24 @@ fun BottomControlRail(
     state: RecorderUiState,
     onModeSelected: (CaptureMode) -> Unit,
     onPrimaryActionClick: () -> Unit,
-    onOpenQuickSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
         modifier = modifier
-            .background(CameraColors.Surface)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .background(CameraColors.Background)
+            .padding(vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        BottomModeStrip(
+        ShutterCluster(
+            state = state,
+            onClick = onPrimaryActionClick,
+        )
+
+        ModeSlider(
             selectedMode = state.mode,
             onModeSelected = onModeSelected,
         )
-
-        Text(
-            text = state.statusMessage,
-            color = CameraColors.TextSecondary,
-            style = MaterialTheme.typography.bodySmall,
-            maxLines = 1,
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(modifier = Modifier.size(54.dp))
-
-            ShutterCluster(
-                state = state,
-                onClick = onPrimaryActionClick,
-            )
-
-            ParamButton(onClick = onOpenQuickSettings)
-        }
-    }
-}
-
-@Composable
-private fun BottomModeStrip(
-    selectedMode: CaptureMode,
-    onModeSelected: (CaptureMode) -> Unit,
-) {
-    val modes = remember { listOf(CaptureMode.PHOTO, CaptureMode.VIDEO, CaptureMode.STRESS) }
-    val selectedIndex = modes.indexOf(selectedMode).coerceAtLeast(0)
-    val density = LocalDensity.current
-    val thresholdPx = with(density) { 56.dp.toPx() }
-    var dragAccumulator by remember { mutableFloatStateOf(0f) }
-
-    val indicatorOffset by animateIntOffsetAsState(
-        targetValue = IntOffset(selectedIndex * 96, 0),
-        label = "mode-strip-indicator",
-    )
-
-    Box(
-        modifier = Modifier
-            .width(288.dp)
-            .pointerInput(selectedMode) {
-                detectHorizontalDragGestures(
-                    onHorizontalDrag = { _, dragAmount ->
-                        dragAccumulator += dragAmount
-                        if (dragAccumulator <= -thresholdPx) {
-                            dragAccumulator = 0f
-                            val next = (selectedIndex + 1).coerceAtMost(modes.lastIndex)
-                            onModeSelected(modes[next])
-                        } else if (dragAccumulator >= thresholdPx) {
-                            dragAccumulator = 0f
-                            val previous = (selectedIndex - 1).coerceAtLeast(0)
-                            onModeSelected(modes[previous])
-                        }
-                    },
-                    onDragEnd = { dragAccumulator = 0f },
-                    onDragCancel = { dragAccumulator = 0f },
-                )
-            },
-    ) {
-        Box(
-            modifier = Modifier
-                .offset { indicatorOffset }
-                .width(96.dp)
-                .background(CameraColors.Accent, RoundedCornerShape(2.dp))
-                .align(Alignment.BottomStart)
-                .size(width = 96.dp, height = 2.dp),
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            modes.forEach { mode ->
-                val selected = mode == selectedMode
-                Text(
-                    text = modeLabel(mode),
-                    color = if (selected) CameraColors.TextPrimary else CameraColors.TextMuted,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                    modifier = Modifier
-                        .width(96.dp)
-                        .clickable { onModeSelected(mode) }
-                        .padding(vertical = 6.dp),
-                )
-            }
-        }
     }
 }
 
@@ -158,71 +76,112 @@ private fun ShutterCluster(
         label = "shutter-scale",
     )
 
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+    val innerSize by animateDpAsState(
+        targetValue = if (state.isRecording) 36.dp else 66.dp,
+        label = "shutter-inner",
+    )
+
+    val innerColor by animateColorAsState(
+        targetValue = if (state.isRecording) CameraColors.Recording else CameraColors.TextPrimary,
+        label = "shutter-color",
+    )
+
+    val innerRadius by animateDpAsState(
+        targetValue = if (state.isRecording) 10.dp else 33.dp,
+        label = "shutter-radius",
+    )
+
+    Box(
+        modifier = Modifier
+            .scale(buttonScale)
+            .size(82.dp)
+            .border(3.dp, CameraColors.TextPrimary, CircleShape)
+            .clip(CircleShape)
+            .clickable(enabled = state.hasCameraPermission, onClick = onClick),
+        contentAlignment = Alignment.Center,
     ) {
         Box(
             modifier = Modifier
-                .scale(buttonScale)
-                .size(94.dp)
-                .border(4.dp, CameraColors.TextPrimary, CircleShape)
-                .clickable(enabled = state.hasCameraPermission, onClick = onClick),
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(if (state.isRecording) 40.dp else 70.dp)
-                    .background(
-                        color = if (state.isRecording) CameraColors.Accent else CameraColors.TextPrimary,
-                        shape = if (state.isRecording) RoundedCornerShape(12.dp) else CircleShape,
-                    ),
-            )
-        }
-
-        Text(
-            text = actionLabel(state),
-            color = CameraColors.TextPrimary,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
+                .size(innerSize)
+                .background(innerColor, RoundedCornerShape(innerRadius)),
         )
     }
 }
 
 @Composable
-private fun ParamButton(onClick: () -> Unit) {
-    Box(
+private fun ModeSlider(
+    selectedMode: CaptureMode,
+    onModeSelected: (CaptureMode) -> Unit,
+) {
+    val modes = remember { listOf(CaptureMode.PHOTO, CaptureMode.VIDEO, CaptureMode.STRESS) }
+    val selectedIndex = modes.indexOf(selectedMode).coerceAtLeast(0)
+    val density = LocalDensity.current
+    val thresholdPx = with(density) { 48.dp.toPx() }
+    var dragAccumulator by remember { mutableFloatStateOf(0f) }
+
+    Row(
         modifier = Modifier
-            .size(width = 56.dp, height = 46.dp)
-            .border(1.dp, CameraColors.BorderStrong)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
+            .fillMaxWidth()
+            .padding(horizontal = 32.dp)
+            .pointerInput(selectedMode) {
+                detectHorizontalDragGestures(
+                    onHorizontalDrag = { _, dragAmount ->
+                        dragAccumulator += dragAmount
+                        if (dragAccumulator <= -thresholdPx) {
+                            dragAccumulator = 0f
+                            val next = (selectedIndex + 1).coerceAtMost(modes.lastIndex)
+                            onModeSelected(modes[next])
+                        } else if (dragAccumulator >= thresholdPx) {
+                            dragAccumulator = 0f
+                            val prev = (selectedIndex - 1).coerceAtLeast(0)
+                            onModeSelected(modes[prev])
+                        }
+                    },
+                    onDragEnd = { dragAccumulator = 0f },
+                    onDragCancel = { dragAccumulator = 0f },
+                )
+            },
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = "PARAM",
-            color = CameraColors.TextPrimary,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.SemiBold,
-        )
+        modes.forEach { mode ->
+            val isSelected = mode == selectedMode
+            val color by animateColorAsState(
+                targetValue = if (isSelected) CameraColors.TextPrimary else CameraColors.TextMuted,
+                label = "mode-color-${mode.name}",
+            )
+
+            Column(
+                modifier = Modifier
+                    .clickable { onModeSelected(mode) }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = modeLabel(mode),
+                    color = color,
+                    fontSize = 13.sp,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                )
+                if (isSelected) {
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 3.dp)
+                            .width(24.dp)
+                            .height(2.dp)
+                            .background(CameraColors.Accent, RoundedCornerShape(1.dp)),
+                    )
+                }
+            }
+        }
     }
 }
 
 private fun modeLabel(mode: CaptureMode): String {
     return when (mode) {
         CaptureMode.PHOTO -> "Фото"
-        CaptureMode.VIDEO -> "Видео RAW"
+        CaptureMode.VIDEO -> "Видео"
         CaptureMode.STRESS -> "Тест"
-    }
-}
-
-private fun actionLabel(state: RecorderUiState): String {
-    if (!state.hasCameraPermission) {
-        return "Нет доступа"
-    }
-
-    return when (state.mode) {
-        CaptureMode.PHOTO -> "Фото"
-        CaptureMode.VIDEO -> if (state.isRecording) "Стоп" else "Запись"
-        CaptureMode.STRESS -> if (state.isRecording) "Стоп тест" else "Старт тест"
     }
 }
