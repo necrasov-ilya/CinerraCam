@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.ImageFormat
+import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -15,6 +16,7 @@ import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.media.ImageReader
 import android.media.MediaRecorder
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -123,6 +125,15 @@ class RawCameraController(
     private var supportsVideoStabilization: Boolean = false
     private var videoStabilizationEnabled: Boolean = false
 
+    private var hasFlashUnit: Boolean = false
+    private var availableFlashModes: List<FlashMode> = listOf(FlashMode.OFF)
+    private var selectedFlashMode: FlashMode = FlashMode.OFF
+    private var availableAfModes: List<AfMode> = listOf(AfMode.CONTINUOUS_PICTURE)
+    private var selectedAfMode: AfMode = AfMode.CONTINUOUS_PICTURE
+    private var maxZoomRatio: Float = 1f
+    private var zoomRatio: Float = 1f
+    private var sensorArraySize: Rect? = null
+
     private var selectedPreviewSize: Size? = null
     private var currentMode: CaptureMode = CaptureMode.PHOTO
     private var targetFps: Int = 24
@@ -200,6 +211,60 @@ class RawCameraController(
     fun setTargetFps(fps: Int) {
         targetFps = fps.coerceIn(1, 240)
         cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+    }
+
+    fun setFlashMode(mode: FlashMode) {
+        if (!hasFlashUnit && mode != FlashMode.OFF) return
+        selectedFlashMode = mode
+        cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+        postCapabilitiesSnapshot()
+    }
+
+    fun setAfMode(mode: AfMode) {
+        if (mode !in availableAfModes) return
+        selectedAfMode = mode
+        cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+        postCapabilitiesSnapshot()
+    }
+
+    fun setZoomRatio(ratio: Float) {
+        zoomRatio = ratio.coerceIn(1f, maxZoomRatio)
+        cameraHandler.post { startRepeating(includeRaw = isRecording.get()) }
+        postCapabilitiesSnapshot()
+    }
+
+    fun triggerAutoFocus(normX: Float, normY: Float) {
+        cameraHandler.post {
+            val device = cameraDevice ?: return@post
+            val session = captureSession ?: return@post
+            val preview = previewSurface ?: return@post
+
+            try {
+                val request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                    addTarget(preview)
+                    if (isRecording.get()) rawReader?.surface?.let { addTarget(it) }
+                    applyCommonCaptureControls(includeRaw = isRecording.get())
+                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+                    set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+
+                    val rect = sensorArraySize
+                    if (rect != null) {
+                        val areaW = (rect.width() * 0.1f).toInt().coerceAtLeast(1)
+                        val areaH = (rect.height() * 0.1f).toInt().coerceAtLeast(1)
+                        val cx = (normX * rect.width()).toInt().coerceIn(areaW / 2, rect.width() - areaW / 2)
+                        val cy = (normY * rect.height()).toInt().coerceIn(areaH / 2, rect.height() - areaH / 2)
+                        val focusArea = android.hardware.camera2.params.MeteringRectangle(
+                            cx - areaW / 2, cy - areaH / 2, areaW, areaH, 1000,
+                        )
+                        set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(focusArea))
+                        set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(focusArea))
+                    }
+                }.build()
+                session.capture(request, captureCallback, cameraHandler)
+            } catch (t: Throwable) {
+                postError("Ошибка автофокуса", t)
+            }
+        }
     }
 
     fun onModeChanged(mode: CaptureMode) {
@@ -617,6 +682,31 @@ class RawCameraController(
         supportsVideoStabilization = supportsDigitalStab || supportsOis
         videoStabilizationEnabled = supportsVideoStabilization
 
+        hasFlashUnit = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
+        availableFlashModes = buildList {
+            add(FlashMode.OFF)
+            if (hasFlashUnit) {
+                add(FlashMode.AUTO)
+                add(FlashMode.ON)
+                add(FlashMode.TORCH)
+            }
+        }
+        selectedFlashMode = FlashMode.OFF
+
+        val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()
+        availableAfModes = AfMode.entries.filter { it.camera2Value in afModes }
+            .ifEmpty { listOf(AfMode.CONTINUOUS_PICTURE) }
+        selectedAfMode = availableAfModes.firstOrNull { it == AfMode.CONTINUOUS_PICTURE }
+            ?: availableAfModes.first()
+
+        sensorArraySize = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        maxZoomRatio = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.upper ?: 1f
+        } else {
+            chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+        }
+        zoomRatio = 1f
+
         postCapabilitiesSnapshot()
         return true
     }
@@ -895,6 +985,13 @@ class RawCameraController(
             manualSensorEnabled = manualSensorEnabled,
             supportsVideoStabilization = supportsVideoStabilization,
             videoStabilizationEnabled = videoStabilizationEnabled,
+            availableFlashModes = availableFlashModes,
+            selectedFlashMode = selectedFlashMode,
+            availableAfModes = availableAfModes,
+            selectedAfMode = selectedAfMode,
+            maxZoomRatio = maxZoomRatio,
+            zoomRatio = zoomRatio,
+            hasFlashUnit = hasFlashUnit,
         )
 
         mainHandler.post {
@@ -904,7 +1001,7 @@ class RawCameraController(
 
     private fun CaptureRequest.Builder.applyCommonCaptureControls(includeRaw: Boolean) {
         set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-        set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+        set(CaptureRequest.CONTROL_AF_MODE, selectedAfMode.camera2Value)
         set(CaptureRequest.CONTROL_AWB_LOCK, false)
         set(CaptureRequest.CONTROL_AE_LOCK, false)
         set(CaptureRequest.CONTROL_CAPTURE_INTENT, if (includeRaw) {
@@ -917,6 +1014,8 @@ class RawCameraController(
         applyWhiteBalance()
         applyExposureAndIso()
         applyStabilization()
+        applyFlash()
+        applyZoom()
 
         set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
 
@@ -984,6 +1083,38 @@ class RawCameraController(
                 if (oisOn) CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
                 else CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF,
             )
+        }
+    }
+
+    private fun CaptureRequest.Builder.applyFlash() {
+        if (!hasFlashUnit) return
+        when (selectedFlashMode) {
+            FlashMode.OFF -> {
+                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+            }
+            FlashMode.ON -> {
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH)
+            }
+            FlashMode.AUTO -> {
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+            }
+            FlashMode.TORCH -> {
+                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+            }
+        }
+    }
+
+    private fun CaptureRequest.Builder.applyZoom() {
+        if (zoomRatio <= 1f) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            set(CaptureRequest.CONTROL_ZOOM_RATIO, zoomRatio)
+        } else {
+            val rect = sensorArraySize ?: return
+            val cropW = (rect.width() / zoomRatio).toInt()
+            val cropH = (rect.height() / zoomRatio).toInt()
+            val left = (rect.width() - cropW) / 2
+            val top = (rect.height() - cropH) / 2
+            set(CaptureRequest.SCALER_CROP_REGION, Rect(left, top, left + cropW, top + cropH))
         }
     }
 

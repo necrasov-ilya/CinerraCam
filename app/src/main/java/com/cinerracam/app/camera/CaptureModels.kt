@@ -1,6 +1,7 @@
 package com.cinerracam.app.camera
 
 import android.hardware.camera2.CameraMetadata
+import android.hardware.camera2.CaptureRequest
 import android.util.Size
 import kotlin.math.abs
 import kotlin.math.max
@@ -10,6 +11,20 @@ enum class CaptureMode {
     PHOTO,
     VIDEO,
     STRESS,
+}
+
+enum class FlashMode(val label: String) {
+    OFF("Выкл"),
+    AUTO("Авто"),
+    ON("Вкл"),
+    TORCH("Факел"),
+}
+
+enum class AfMode(val camera2Value: Int, val label: String) {
+    CONTINUOUS_PICTURE(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE, "AF-C"),
+    CONTINUOUS_VIDEO(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO, "AF-V"),
+    AUTO(CaptureRequest.CONTROL_AF_MODE_AUTO, "AF-S"),
+    OFF(CaptureRequest.CONTROL_AF_MODE_OFF, "MF"),
 }
 
 data class RawSizeOption(
@@ -101,6 +116,13 @@ data class CameraCapabilitiesSnapshot(
     val manualSensorEnabled: Boolean,
     val supportsVideoStabilization: Boolean,
     val videoStabilizationEnabled: Boolean,
+    val availableFlashModes: List<FlashMode>,
+    val selectedFlashMode: FlashMode,
+    val availableAfModes: List<AfMode>,
+    val selectedAfMode: AfMode,
+    val maxZoomRatio: Float,
+    val zoomRatio: Float,
+    val hasFlashUnit: Boolean,
 )
 
 data class RecordingStats(

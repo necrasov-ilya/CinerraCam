@@ -3,9 +3,11 @@ package com.cinerracam.app.ui
 import android.app.Application
 import android.view.TextureView
 import androidx.lifecycle.AndroidViewModel
+import com.cinerracam.app.camera.AfMode
 import com.cinerracam.app.camera.AspectRatioOption
 import com.cinerracam.app.camera.CameraCapabilitiesSnapshot
 import com.cinerracam.app.camera.CaptureMode
+import com.cinerracam.app.camera.FlashMode
 import com.cinerracam.app.camera.RawCameraController
 import com.cinerracam.app.camera.RawSizeOption
 import com.cinerracam.app.camera.RecordingStats
@@ -52,6 +54,14 @@ data class RecorderUiState(
     val videoStabilizationEnabled: Boolean = false,
     val previewDebugInfo: String = "",
     val hapticsIntensity: HapticsIntensity = HapticsIntensity.NORMAL,
+    val availableFlashModes: List<FlashMode> = listOf(FlashMode.OFF),
+    val selectedFlashMode: FlashMode = FlashMode.OFF,
+    val availableAfModes: List<AfMode> = listOf(AfMode.CONTINUOUS_PICTURE),
+    val selectedAfMode: AfMode = AfMode.CONTINUOUS_PICTURE,
+    val maxZoomRatio: Float = 1f,
+    val zoomRatio: Float = 1f,
+    val hasFlashUnit: Boolean = false,
+    val showGrid: Boolean = false,
 )
 
 class RecorderViewModel(application: Application) : AndroidViewModel(application), RawCameraController.Listener {
@@ -179,6 +189,29 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         reduce { it.copy(hapticsIntensity = intensity) }
     }
 
+    fun onFlashModeChanged(mode: FlashMode) {
+        reduce { it.copy(selectedFlashMode = mode) }
+        controller.setFlashMode(mode)
+    }
+
+    fun onAfModeChanged(mode: AfMode) {
+        reduce { it.copy(selectedAfMode = mode) }
+        controller.setAfMode(mode)
+    }
+
+    fun onZoomRatioChanged(ratio: Float) {
+        reduce { it.copy(zoomRatio = ratio) }
+        controller.setZoomRatio(ratio)
+    }
+
+    fun onTouchToFocus(normX: Float, normY: Float) {
+        controller.triggerAutoFocus(normX, normY)
+    }
+
+    fun onGridToggle() {
+        reduce { it.copy(showGrid = !it.showGrid) }
+    }
+
     fun onPrimaryActionClick() {
         val state = uiState.value
         when (state.mode) {
@@ -217,6 +250,13 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
                 manualSensorEnabled = snapshot.manualSensorEnabled,
                 supportsVideoStabilization = snapshot.supportsVideoStabilization,
                 videoStabilizationEnabled = snapshot.videoStabilizationEnabled,
+                availableFlashModes = snapshot.availableFlashModes,
+                selectedFlashMode = snapshot.selectedFlashMode,
+                availableAfModes = snapshot.availableAfModes,
+                selectedAfMode = snapshot.selectedAfMode,
+                maxZoomRatio = snapshot.maxZoomRatio,
+                zoomRatio = snapshot.zoomRatio,
+                hasFlashUnit = snapshot.hasFlashUnit,
                 statusMessage = "Камера готова: ${snapshot.cameraId}",
             )
         }

@@ -6,6 +6,14 @@ enum class HapticsIntensity {
     RICH,
 }
 
+enum class QuickControl {
+    EV,
+    ISO,
+    SHUTTER_SPEED,
+    WB,
+    FOCUS_MODE,
+}
+
 data class ControlAvailability(
     val enabled: Boolean,
     val lockReason: String? = null,
