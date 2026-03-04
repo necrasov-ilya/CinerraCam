@@ -208,6 +208,7 @@ class RawCameraController(
             return
         }
 
+        val previousRawSize = selectedRawSize
         val preferredResolution = when (mode) {
             CaptureMode.PHOTO -> selectedPhotoResolution
             CaptureMode.VIDEO, CaptureMode.STRESS -> selectedVideoResolution
@@ -216,9 +217,14 @@ class RawCameraController(
             adaptRawSizeForResolution(preferredResolution)
         }
 
+        val rawSizeChanged = previousRawSize != selectedRawSize
         cameraHandler.post {
-            if (cameraDevice != null) {
-                configureSession()
+            if (cameraDevice != null && captureSession != null) {
+                if (rawSizeChanged) {
+                    configureSession()
+                } else {
+                    startRepeating(includeRaw = false)
+                }
             }
         }
         postCapabilitiesSnapshot()
@@ -807,7 +813,7 @@ class RawCameraController(
                 viewportWidth = viewWidth,
                 viewportHeight = viewHeight,
                 targetCaptureAspectRatio = selectedAspectRatio?.ratio ?: selectedRawSize?.aspectRatio,
-                targetCaptureArea = selectedRawSize?.area,
+                targetCaptureArea = null,
             ),
         )
     }
